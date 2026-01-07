@@ -6,7 +6,7 @@ from timm.models.swin_transformer_v2 import SwinTransformerV2Stage
 
 from typing import Sequence, Type
 
-from model.vaebase import G2EVAE
+from models.vaebase import G2EVAE
 
 
 
@@ -23,7 +23,7 @@ print(f"input: {input.shape}")
 # print(f"\nUNet输出尺寸: {output_unet.shape}")
 
 # 测试VAE版本
-fuxi_vae = FuxiVAE(embed_dim=864, num_heads=8, window_size=7, latent_dim=864).to(device)
+fuxi_vae = G2EVAE(embed_dim=864, num_heads=8, window_size=7, latent_dim=864).to(device)
 output_vae, mu, log_var = fuxi_vae(input)
 print(f"VAE输出尺寸: {output_vae.shape}")
 print(f"mu shape: {mu.shape}, log_var shape: {log_var.shape}")

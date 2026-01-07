@@ -6,7 +6,7 @@ from timm.models.swin_transformer_v2 import SwinTransformerV2Stage
 
 from typing import Sequence, Type
 
-from base import G2EBase
+from .base import G2EBase, DownBlock, UpBlock
 
 
 
