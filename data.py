@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import xarray as xr
 
-# ===================== 1. 变量映射表 =====================
+
 gfs2era5_mapping = {
     "Temperature": {
         "era5_vars": ["t50", "t100", "t150", "t200", "t250", "t300", "t400", "t500", "t600", "t700", "t850", "t925", "t1000"],
@@ -68,36 +68,7 @@ for gfs_var, info in gfs2era5_mapping.items():
     for era5_var in info["era5_vars"]:
         era52gfs_mapping[era5_var] = gfs_var
 
-# ===================== 2. 工具函数：统一层数填充 =====================
-def pad_to_base_layers(data: np.ndarray, base_layers: int = 13, pad_mode: str = "repeat") -> np.ndarray:
-    """
-    将变量填充到基准层数（解决单层/13层变量维度不一致问题）
-    Args:
-        data: 输入数组，形状(D, H, W)，D=1或13
-        base_layers: 基准层数（默认13）
-        pad_mode: 填充方式 - "repeat"（重复单层）/"zero"（补零）
-    Returns:
-        填充后数组，形状(base_layers, H, W)
-    """
-    D, H, W = data.shape
-    if D == base_layers:
-        return data
-    
-    if D != 1:
-        raise ValueError(f"变量层数必须是1或{base_layers}，当前为{D}")
-    
-    if pad_mode == "repeat":
-        # 重复填充（物理意义更合理：地面变量在所有高度层均为该值）
-        return np.repeat(data, base_layers, axis=0)
-    elif pad_mode == "zero":
-        # 补零填充（仅第0层有效）
-        pad_data = np.zeros((base_layers, H, W), dtype=data.dtype)
-        pad_data[0:1, :, :] = data
-        return pad_data
-    else:
-        raise ValueError(f"不支持的填充方式：{pad_mode}，可选'repeat'/'zero'")
 
-# ===================== 3. ERA5Reader =====================
 class ERA5Reader:
     def __init__(self,
                 zarr_path: str = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/dataset/era5.2002_2024.c85.p25.h6",
@@ -259,7 +230,7 @@ class ERA5Reader:
         """返回所有支持的GFS通用变量名"""
         return list(self.gfs2era5_vars.keys())
 
-# ===================== 4. GFSReader =====================
+
 class GFSReader:
     def __init__(self,
                 zarr_path: str = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10",
@@ -382,166 +353,159 @@ class GFSReader:
             self.ds.close()
             print("✅ GFS Dataset已关闭")
 
-# ===================== 5. 核心Dataset：GFSERA5PairDataset =====================
+
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+def pad_to_base_layers(data: np.ndarray, base_layers: int = 13, pad_mode: str = "repeat") -> np.ndarray:
+    """
+    data: (D, H, W), D in {1, base_layers}
+    return: (base_layers, H, W)
+    """
+    D, H, W = data.shape
+    if D == base_layers:
+        return data
+    if D != 1:
+        raise ValueError(f"变量层数必须是1或{base_layers}，当前为{D}")
+
+    if pad_mode == "repeat":
+        return np.repeat(data, base_layers, axis=0)
+    elif pad_mode == "zero":
+        out = np.zeros((base_layers, H, W), dtype=data.dtype)
+        out[0:1] = data
+        return out
+    else:
+        raise ValueError("pad_mode must be 'repeat' or 'zero'")
+
 class GFSERA5PairDataset(Dataset):
+    """
+    单样本返回:
+      gfs: (L, V, H, W)
+      era5:(L, V, H, W)
+      ts:  str
+    其中 L=base_layers(默认13), V=len(gfs_vars)
+    """
     def __init__(
         self,
-        gfs_reader: GFSReader,
-        era5_reader: ERA5Reader,
-        gfs_vars: Optional[List[str]] = None,
-        normalize: bool = False,
+        gfs_reader,
+        era5_reader,
+        gfs_vars=None,
         base_layers: int = 13,
-        pad_mode: str = "repeat"
+        pad_mode: str = "repeat",
+        normalize: bool = False,
+        norm_sample_num: int = 100,
+        eps: float = 1e-8,
     ):
         self.gfs_reader = gfs_reader
         self.era5_reader = era5_reader
-        self.gfs_vars = gfs_vars or gfs_reader.all_gfs_vars
+        self.gfs_vars = gfs_vars or list(getattr(gfs_reader, "all_gfs_vars"))
+        self.base_layers = base_layers
+        self.pad_mode = pad_mode
         self.normalize = normalize
-        self.base_layers = base_layers  # 统一层数的基准
-        self.pad_mode = pad_mode        # 填充方式
-        
-        # 时间戳对齐
-        gfs_time_set = set(gfs_reader.time_index)
-        era5_time_set = set(era5_reader.time_index)
-        self.common_timestamps = sorted(list(gfs_time_set & era5_time_set))
-        
+        self.norm_sample_num = norm_sample_num
+        self.eps = eps
+
+        # 取交集时间戳，确保严格配对（不会“各自 nearest 造成错配”）
+        gfs_times = set(gfs_reader.time_index)
+        era5_times = set(era5_reader.time_index)
+        self.common_timestamps = sorted(list(gfs_times & era5_times))
         if len(self.common_timestamps) == 0:
-            raise ValueError("GFS和ERA5无重叠的有效时间戳！")
-        
-        print(f"✅ 时间戳对齐完成：共找到 {len(self.common_timestamps)} 个重叠时间戳")
-        
-        # 预计算归一化参数
+            raise ValueError("GFS 和 ERA5 没有重叠时间戳，无法配对")
+
+        # (可选) 按变量做标准化：每个变量独立 mean/std（对 pad 后的 (L,H,W) 统计）
+        self.norm_params = None
         if self.normalize:
-            self.norm_params = self._compute_normalize_params()
+            self.norm_params = self._compute_norm_params()
 
-    def _compute_normalize_params(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-        """按变量独立计算归一化参数（先填充到基准层数）"""
-        norm_params = {}
-        sample_num = min(100, len(self.common_timestamps))
-        
-        for var_name in self.gfs_vars:
-            sample_data = []
-            for ts in self.common_timestamps[:sample_num]:
-                gfs_data = self.gfs_reader.read_by_time(ts, [var_name])[var_name]
-                era5_data = self.era5_reader.read_by_time(ts, [var_name])[var_name]
-                
-                # 先填充到基准层数
-                gfs_data = pad_to_base_layers(gfs_data, self.base_layers, self.pad_mode)
-                era5_data = pad_to_base_layers(era5_data, self.base_layers, self.pad_mode)
-                
-                sample_data.append(gfs_data)
-                sample_data.append(era5_data)
-            
-            sample_stack = np.stack(sample_data)
-            # 按层数维度计算均值/标准差（保持维度：(base_layers,1,1)）
-            mean = np.mean(sample_stack, axis=(0, 2, 3), keepdims=True)
-            std = np.std(sample_stack, axis=(0, 2, 3), keepdims=True) + 1e-8
-            norm_params[var_name] = (mean, std)
-        
-        print(f"✅ 归一化参数计算完成（变量数：{len(norm_params)}）")
-        return norm_params
+    def _compute_norm_params(self):
+        params = {}
+        n = min(self.norm_sample_num, len(self.common_timestamps))
+        for var in self.gfs_vars:
+            buf = []
+            for ts in self.common_timestamps[:n]:
+                g = self.gfs_reader.read_by_time(ts, [var])[var]
+                e = self.era5_reader.read_by_time(ts, [var])[var]
+                g = pad_to_base_layers(g, self.base_layers, self.pad_mode)
+                e = pad_to_base_layers(e, self.base_layers, self.pad_mode)
+                buf.append(g); buf.append(e)
+            x = np.stack(buf, axis=0)  # (2n, L, H, W)
+            mean = np.mean(x, axis=(0, 2, 3), keepdims=True)  # (1, L, 1, 1)
+            std = np.std(x, axis=(0, 2, 3), keepdims=True) + self.eps
+            params[var] = (mean, std)
+        return params
 
-    def _normalize_data(self, data: np.ndarray, var_name: str) -> np.ndarray:
-        """对填充后的变量数据做归一化"""
-        mean, std = self.norm_params[var_name]
-        return (data - mean) / std
+    def _norm(self, x: np.ndarray, var: str) -> np.ndarray:
+        mean, std = self.norm_params[var]
+        # x: (L,H,W) -> broadcast with (1,L,1,1) by adding axis
+        return (x[None, ...] - mean) / std  # (1,L,H,W)
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.common_timestamps)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, str]:
-        """
-        修复后返回：
-            gfs_tensor: (base_layers, V, 721, 1440)  4维：层数→变量→纬度→经度
-            era5_tensor: (base_layers, V, 721, 1440)
-            timestamp_str: 时间戳字符串
-        """
-        timestamp = self.common_timestamps[idx]
-        timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
-        
-        # 存储每个变量处理后的张量：(base_layers, 1, 721, 1440)
-        gfs_var_tensors = []
-        era5_var_tensors = []
-        
-        for var_name in self.gfs_vars:
-            # 1. 读取原始数据（D, 721, 1440）
-            gfs_data = self.gfs_reader.read_by_time(timestamp, [var_name])[var_name]  # (D,721,1440)
-            era5_data = self.era5_reader.read_by_time(timestamp, [var_name])[var_name]  # (D,721,1440)
-            
-            # 2. 统一填充到基准层数（核心：解决单层/13层不一致）
-            gfs_data_padded = pad_to_base_layers(gfs_data, self.base_layers, self.pad_mode)  # (13,721,1440)
-            era5_data_padded = pad_to_base_layers(era5_data, self.base_layers, self.pad_mode)  # (13,721,1440)
-            
-            # 3. 归一化（可选）
+    def __getitem__(self, idx):
+        ts = self.common_timestamps[idx]
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+
+        gfs_vars_LVHW = []
+        era5_vars_LVHW = []
+
+        for var in self.gfs_vars:
+            g = self.gfs_reader.read_by_time(ts, [var])[var]   # (D,H,W)
+            e = self.era5_reader.read_by_time(ts, [var])[var]  # (D,H,W)
+
+            g = pad_to_base_layers(g, self.base_layers, self.pad_mode)  # (L,H,W)
+            e = pad_to_base_layers(e, self.base_layers, self.pad_mode)  # (L,H,W)
+
             if self.normalize:
-                gfs_data_padded = self._normalize_data(gfs_data_padded, var_name)
-                era5_data_padded = self._normalize_data(era5_data_padded, var_name)
-            
-            # 4. 转换为Tensor并添加变量维度 → (13, 1, 721, 1440)
-            #    关键：unsqueeze(1) 是在第1维（变量维）添加维度，不是第0维！
-            gfs_tensor = torch.from_numpy(gfs_data_padded).float().unsqueeze(1)
-            era5_tensor = torch.from_numpy(era5_data_padded).float().unsqueeze(1)
-            
-            gfs_var_tensors.append(gfs_tensor)
-            era5_var_tensors.append(era5_tensor)
-        
-        # 5. 合并所有变量到第1维（变量维） → (13, V, 721, 1440)
-        #    关键：dim=1 是合并变量维度，不是dim=0！
-        gfs_combined = torch.cat(gfs_var_tensors, dim=1)
-        era5_combined = torch.cat(era5_var_tensors, dim=1)
-        
-        # 调试：打印单样本维度（确认正确）
-        if idx == 0:
-            print(f"\n=== 单样本维度验证 ===")
-            print(f"单样本形状：{gfs_combined.shape}")
-            print(f"  - 层数维度：{gfs_combined.shape[0]}")
-            print(f"  - 变量维度：{gfs_combined.shape[1]}")
-            print(f"  - 空间维度：{gfs_combined.shape[2]}×{gfs_combined.shape[3]}")
-        
-        return gfs_combined, era5_combined, timestamp_str
+                g = self._norm(g, var)[0]  # back to (L,H,W)
+                e = self._norm(e, var)[0]
 
+            # 变成 (L,1,H,W)
+            gfs_vars_LVHW.append(torch.from_numpy(g).float().unsqueeze(1))
+            era5_vars_LVHW.append(torch.from_numpy(e).float().unsqueeze(1))
 
-# ===================== 6. 自定义Collate函数：融合Batch+层数 =====================
+        # 合并变量维： (L,V,H,W)
+        gfs = torch.cat(gfs_vars_LVHW, dim=1)
+        era5 = torch.cat(era5_vars_LVHW, dim=1)
+
+        return gfs, era5, ts_str
+
 def collate_fn(batch, base_layers: int = 13):
     """
-    强制确保层数融入Batch维度，输出4维张量
+    输入batch: List[(gfs(L,V,H,W), era5(L,V,H,W), ts_str)]
+    输出:
+      gfs_batch: (B*L, V, H, W)
+      era5_batch: (B*L, V, H, W)
+      ts_batch:   List[str] 长度 B*L（每层复制时间戳）
     """
-    gfs_list = []
-    era5_list = []
-    ts_batch = []
-    
-    for gfs_tensor, era5_tensor, ts in batch:
-        # 验证单样本形状：必须是 (13, V, 721, 1440)
-        assert len(gfs_tensor.shape) == 4 and gfs_tensor.shape[0] == base_layers, \
-            f"单样本形状错误，需({base_layers}, V, 721, 1440)，当前{gfs_tensor.shape}"
-        
-        gfs_list.append(gfs_tensor)
-        era5_list.append(era5_tensor)
-        ts_batch.append(ts)
-    
-    # 1. 堆叠batch维度 → (B, 13, V, 721, 1440)
-    gfs_stack = torch.stack(gfs_list, dim=0)
-    era5_stack = torch.stack(era5_list, dim=0)
-    
-    # 2. 强制融合B和层数维度 → (B×13, V, 721, 1440)
-    #    - size()获取维度值，reshape强制重构
-    B = gfs_stack.shape[0]
-    V = gfs_stack.shape[2]
-    H = gfs_stack.shape[3]
-    W = gfs_stack.shape[4]
-    
-    gfs_batch = gfs_stack.reshape(B * base_layers, V, H, W)
-    era5_batch = era5_stack.reshape(B * base_layers, V, H, W)
-    
-    # 打印正确的维度日志
-    print(f"=== 批量维度 ===")
-    print(f"Batch维度（B×13）：{gfs_batch.shape[0]}（{B}×{base_layers}={B*base_layers}）")
-    print(f"Channels维度（变量数）：{gfs_batch.shape[1]}（{V}个）")
-    print(f"最终张量形状：{gfs_batch.shape}")
-    print(f"批量时间戳：{ts_batch}")
-    
-    return gfs_batch, era5_batch, ts_batch
-# ===================== 7. 测试主函数 =====================
+    g_list, e_list, ts_list = [], [], []
+    for g, e, ts in batch:
+        if g.ndim != 4 or g.shape[0] != base_layers:
+            raise ValueError(f"期望单样本 gfs 为 ({base_layers},V,H,W)，实际 {tuple(g.shape)}")
+        if e.ndim != 4 or e.shape[0] != base_layers:
+            raise ValueError(f"期望单样本 era5 为 ({base_layers},V,H,W)，实际 {tuple(e.shape)}")
+        g_list.append(g)
+        e_list.append(e)
+        ts_list.append(ts)
+
+    g_stack = torch.stack(g_list, dim=0)  # (B,L,V,H,W)
+    e_stack = torch.stack(e_list, dim=0)  # (B,L,V,H,W)
+
+    B, L, V, H, W = g_stack.shape
+    g_batch = g_stack.reshape(B * L, V, H, W)
+    e_batch = e_stack.reshape(B * L, V, H, W)
+
+    # 每个时间戳复制 L 次，对齐 B*L
+    ts_out = []
+    for ts in ts_list:
+        ts_out.extend([ts] * L)
+
+    return g_batch, e_batch, ts_out
+
+
+
 if __name__ == "__main__":
     # 1. 初始化Reader
     gfs_reader = GFSReader(
@@ -564,7 +528,7 @@ if __name__ == "__main__":
         gfs_reader=gfs_reader,
         era5_reader=era5_reader,
         gfs_vars=train_vars,
-        normalize=True,
+        normalize=False,
         base_layers=13,
         pad_mode="repeat"  # 推荐用repeat（物理意义更合理）
     )
@@ -592,9 +556,9 @@ if __name__ == "__main__":
     # 6. 测试批量数据
     # 替换原有测试循环
     for batch_idx, (gfs_batch, era5_batch, ts_batch) in enumerate(dataloader):
-        # 这里无需额外打印，collate_fn内部已打印正确日志
-        if batch_idx >= 1:
-            break
+        print(f"[DataLoader] batch_idx={batch_idx}, gfs_batch={tuple(gfs_batch.shape)}, era5_batch={tuple(era5_batch.shape)}")
+        print(f"[DataLoader] merged_batch={gfs_batch.shape[0]} (应该等于 batch_size*13)")
+        break
     
     # 7. 关闭资源
     gfs_reader.close()

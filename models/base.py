@@ -37,42 +37,6 @@ def get_pad2d(input_resolution, window_size):
     return padding[: 4]
 
 
-    
-class UTransformer(nn.Module):
-    """原始UNet版本的Transformer（无VAE）"""
-    def __init__(self, embed_dim, num_groups, input_resolution, num_heads, window_size, depth):
-        super().__init__()
-        num_groups = to_2tuple(num_groups)
-        window_size = to_2tuple(window_size)
-        padding = get_pad2d(input_resolution, window_size)
-        padding_left, padding_right, padding_top, padding_bottom = padding
-        self.padding = padding
-        self.pad = nn.ZeroPad2d(padding)
-        input_resolution = list(input_resolution)
-        input_resolution[0] = input_resolution[0] + padding_top + padding_bottom
-        input_resolution[1] = input_resolution[1] + padding_left + padding_right
-        
-        self.down = DownBlock(embed_dim, embed_dim, num_groups[0])
-        self.layer = SwinTransformerV2Stage(embed_dim, embed_dim, input_resolution, depth, num_heads, window_size)
-        self.up = UpBlock(embed_dim * 2, embed_dim, num_groups[1])
-
-    def forward(self, x):
-        B, C, Lat, Lon = x.shape
-        padding_left, padding_right, padding_top, padding_bottom = self.padding
-        
-        x_down = self.down(x)
-        shortcut = x_down
-        
-        x_pad = self.pad(x_down)
-        x_pad = x_pad.permute(0, 2, 3, 1)
-        x_swin = self.layer(x_pad)
-        x_swin = x_swin.permute(0, 3, 1, 2)
-        x_swin = x_swin[:, :, padding_top:-padding_bottom, padding_left:-padding_right]
-        
-        x_concat = torch.cat([shortcut, x_swin], dim=1)
-        x_up = self.up(x_concat)
-        
-        return x_up  # 仅返回特征，无mu/log_var
 
 class CubeEmbedding(nn.Module):
     def __init__(self, img_size, patch_size, in_chans, embed_dim, norm_layer=nn.LayerNorm):
@@ -152,6 +116,42 @@ class UpBlock(nn.Module):
         return x + shortcut
 
 
+    
+class UTransformer(nn.Module):
+    """原始UNet版本的Transformer（无VAE）"""
+    def __init__(self, embed_dim, num_groups, input_resolution, num_heads, window_size, depth):
+        super().__init__()
+        num_groups = to_2tuple(num_groups)
+        window_size = to_2tuple(window_size)
+        padding = get_pad2d(input_resolution, window_size)
+        padding_left, padding_right, padding_top, padding_bottom = padding
+        self.padding = padding
+        self.pad = nn.ZeroPad2d(padding)
+        input_resolution = list(input_resolution)
+        input_resolution[0] = input_resolution[0] + padding_top + padding_bottom
+        input_resolution[1] = input_resolution[1] + padding_left + padding_right
+        
+        self.down = DownBlock(embed_dim, embed_dim, num_groups[0])
+        self.layer = SwinTransformerV2Stage(embed_dim, embed_dim, input_resolution, depth, num_heads, window_size)
+        self.up = UpBlock(embed_dim * 2, embed_dim, num_groups[1])
+
+    def forward(self, x):
+        B, C, Lat, Lon = x.shape
+        padding_left, padding_right, padding_top, padding_bottom = self.padding
+        
+        x_down = self.down(x)
+        shortcut = x_down
+        
+        x_pad = self.pad(x_down)
+        x_pad = x_pad.permute(0, 2, 3, 1)
+        x_swin = self.layer(x_pad)
+        x_swin = x_swin.permute(0, 3, 1, 2)
+        x_swin = x_swin[:, :, padding_top:-padding_bottom, padding_left:-padding_right]
+        
+        x_concat = torch.cat([shortcut, x_swin], dim=1)
+        x_up = self.up(x_concat)
+        
+        return x_up  # 仅返回特征，无mu/log_var
 
 
 class G2EBase(nn.Module):
@@ -223,3 +223,16 @@ class G2EBase(nn.Module):
     def _forward_transformer(self, x):
         """子类需实现：Transformer的forward逻辑"""
         raise NotImplementedError("子类必须实现_forward_transformer方法")
+
+
+if __name__ == "__main__":
+    B = 1
+    inchans = outchans = 10
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    input = torch.randn(B, inchans, 2,721, 1440).to(device)
+    print(f"input: {input.shape}")
+    model = G2EBase().to(device)
+
+    output = model(input)
+
+    print(f"output: {output.shape}")
