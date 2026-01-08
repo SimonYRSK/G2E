@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from timm.layers.helpers import to_2tuple
 from timm.models.swin_transformer_v2 import SwinTransformerV2Stage
-
+from base import G2EBase, DownBlock, UpBlock
 from typing import Sequence, Type
 
 
@@ -78,5 +78,23 @@ class UTransformer(nn.Module):
 
 class G2EUnet(G2EBase):
     def __init__(self, **kwargs):
-
+        kwargs["transformer_cls"] = UTransformer
         super().__init__(**kwargs)
+
+    def _forward_transformer(self, x):
+        return self.transformer(x)
+
+    def forward(self, x: torch.Tensor):
+        return self._common_forward(x)
+
+if __name__ == "__main__":
+    B = 1
+    inchans = outchans = 10
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    input = torch.randn(B, inchans, 2,721, 1440).to(device)
+    print(f"input: {input.shape}")
+    model = G2EUnet().to(device)
+
+    output = model(input)
+
+    print(f"output: {output.shape}")
