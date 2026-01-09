@@ -7,7 +7,8 @@ from typing import Dict, List, Tuple, Optional
 import torch
 from torch.utils.data import Dataset, DataLoader
 import xarray as xr
-
+from tqdm.auto import tqdm
+import time
 
 gfs2era5_mapping = {
     "Temperature": {
@@ -186,7 +187,7 @@ class ERA5Reader:
             raise ValueError(f"目标时间{target_time}无对应的有效ERA5数据")
         return nearest_idx
 
-    def read_by_time(self, target_time: datetime, gfs_vars: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
+    def read_by_time(self, target_time: datetime, gfs_vars: Optional[List[str]] = None, verbose: bool = False) -> Dict[str, np.ndarray]:
         """
         按目标时间读取ERA5数据，返回{GFS通用变量名: (层数, lat, lon)}
         """
@@ -208,15 +209,14 @@ class ERA5Reader:
                 if era5_var not in self.channel_name2idx:
                     raise ValueError(f"ERA5无该通道：{era5_var}")
                 chan_idx = self.channel_name2idx[era5_var]
-                
-                # 读取数据：(time, channel, lat, lon) → 取指定time和channel
                 var_data = self.data_zarr[time_idx, chan_idx, :, :]  # (lat, lon)
                 layer_data_list.append(var_data)
             
-            # 拼接分层变量 → (层数, lat, lon)
             var_data_3d = np.stack(layer_data_list, axis=0)
             result[gfs_var] = var_data_3d
-            print(f"📌 ERA5通用变量{gfs_var}：拼接{len(era5_vars)}层，形状{var_data_3d.shape}")
+
+            if verbose:
+                print(f"📌 ERA5通用变量{gfs_var}：拼接{len(era5_vars)}层，形状{var_data_3d.shape}")
         
         return result
 
@@ -379,13 +379,57 @@ def pad_to_base_layers(data: np.ndarray, base_layers: int = 13, pad_mode: str = 
     else:
         raise ValueError("pad_mode must be 'repeat' or 'zero'")
 
+def _default_norm_cache_path(era5_reader, gfs_vars: List[str], base_layers: int, pad_mode: str) -> Path:
+    # 文件名里带上时间范围 + L + pad_mode + 变量数量，避免混用
+    start_str = era5_reader.start_dt.strftime("%Y%m%d%H")
+    end_str = era5_reader.end_dt.strftime("%Y%m%d%H")
+    fname = f"era5_norm_{start_str}_{end_str}_L{base_layers}_{pad_mode}_V{len(gfs_vars)}.npz"
+    return Path(__file__).resolve().parent / fname
+
+
+def _save_norm_npz(path: Path, params: Dict[str, Tuple[np.ndarray, np.ndarray]], meta: Dict[str, str]):
+    arrays = {}
+    arrays["__vars__"] = np.array(list(params.keys()), dtype=object)
+    for k, v in meta.items():
+        arrays[f"__meta__{k}"] = np.array(str(v), dtype=object)
+
+    for var, (mean_L, std_L) in params.items():
+        arrays[f"{var}__mean"] = mean_L.astype(np.float32)  # (L,)
+        arrays[f"{var}__std"] = std_L.astype(np.float32)    # (L,)
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **arrays)
+
+def _load_norm_npz(path: Path) -> Tuple[Dict[str, Tuple[np.ndarray, np.ndarray]], Dict[str, str]]:
+    z = np.load(path, allow_pickle=True)
+    vars_list = [str(x) for x in z["__vars__"].tolist()]
+    meta = {}
+    for key in z.files:
+        if key.startswith("__meta__"):
+            meta[key.replace("__meta__", "", 1)] = str(z[key].item())
+
+    params = {}
+    for var in vars_list:
+        mean_L = z[f"{var}__mean"].astype(np.float32)  # (L,)
+        std_L = z[f"{var}__std"].astype(np.float32)    # (L,)
+        params[var] = (mean_L, std_L)
+    return params, meta
+
+
+
+
 class GFSERA5PairDataset(Dataset):
     """
     单样本返回:
       gfs: (L, V, H, W)
       era5:(L, V, H, W)
       ts:  str
-    其中 L=base_layers(默认13), V=len(gfs_vars)
+
+    normalize=True 时：
+      - 仅用 ERA5 在整个时间段(era5_reader.start_dt~end_dt)统计 mean/std
+      - 按 “变量 × 层” 统计：mean/std 形状为 (L,)
+      - 同一套参数同时用于 GFS 和 ERA5
+      - 缓存到 npz，避免每次重复统计
     """
     def __init__(
         self,
@@ -395,7 +439,7 @@ class GFSERA5PairDataset(Dataset):
         base_layers: int = 13,
         pad_mode: str = "repeat",
         normalize: bool = False,
-        norm_sample_num: int = 100,
+        norm_cache_path: Optional[str] = None,
         eps: float = 1e-8,
     ):
         self.gfs_reader = gfs_reader
@@ -404,42 +448,135 @@ class GFSERA5PairDataset(Dataset):
         self.base_layers = base_layers
         self.pad_mode = pad_mode
         self.normalize = normalize
-        self.norm_sample_num = norm_sample_num
         self.eps = eps
 
-        # 取交集时间戳，确保严格配对（不会“各自 nearest 造成错配”）
+        # 取交集时间戳，确保严格配对
         gfs_times = set(gfs_reader.time_index)
         era5_times = set(era5_reader.time_index)
         self.common_timestamps = sorted(list(gfs_times & era5_times))
         if len(self.common_timestamps) == 0:
             raise ValueError("GFS 和 ERA5 没有重叠时间戳，无法配对")
 
-        # (可选) 按变量做标准化：每个变量独立 mean/std（对 pad 后的 (L,H,W) 统计）
-        self.norm_params = None
+        self.norm_params: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None
         if self.normalize:
-            self.norm_params = self._compute_norm_params()
+            cache_path = Path(norm_cache_path) if norm_cache_path else _default_norm_cache_path(
+                era5_reader=self.era5_reader,
+                gfs_vars=self.gfs_vars,
+                base_layers=self.base_layers,
+                pad_mode=self.pad_mode,
+            )
 
-    def _compute_norm_params(self):
+            if cache_path.exists():
+                self.norm_params, _ = _load_norm_npz(cache_path)
+                print(f"✅ 读取标准化缓存：{cache_path}")
+            else:
+                self.norm_params = self._compute_era5_norm_params_over_full_period()
+                meta = {
+                    "start_dt": self.era5_reader.start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_dt": self.era5_reader.end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "base_layers": str(self.base_layers),
+                    "pad_mode": str(self.pad_mode),
+                }
+                _save_norm_npz(cache_path, self.norm_params, meta)
+                print(f"✅ 已保存标准化缓存：{cache_path}")
+
+    def _compute_era5_norm_params_over_full_period(self, time_block: int = 8):
+        """
+        更快版本：直接从 era5_reader.data_zarr 分块读 (time_block,H,W)，累计 sum/sumsq
+        - upper_air: 13个通道分别统计 -> mean/std shape (13,)
+        - surface: 1个通道统计；pad_mode=repeat 时复制到 13 层
+        """
         params = {}
-        n = min(self.norm_sample_num, len(self.common_timestamps))
-        for var in self.gfs_vars:
-            buf = []
-            for ts in self.common_timestamps[:n]:
-                g = self.gfs_reader.read_by_time(ts, [var])[var]
-                e = self.era5_reader.read_by_time(ts, [var])[var]
-                g = pad_to_base_layers(g, self.base_layers, self.pad_mode)
-                e = pad_to_base_layers(e, self.base_layers, self.pad_mode)
-                buf.append(g); buf.append(e)
-            x = np.stack(buf, axis=0)  # (2n, L, H, W)
-            mean = np.mean(x, axis=(0, 2, 3), keepdims=True)  # (1, L, 1, 1)
-            std = np.std(x, axis=(0, 2, 3), keepdims=True) + self.eps
-            params[var] = (mean, std)
+        print("normalizing...")
+        z = self.era5_reader.data_zarr
+        H = self.era5_reader.lat_size
+        W = self.era5_reader.lon_size
+
+        # ERA5Reader.valid_time_indices 是连续 range(start,end)，所以可以用 slice 批量读
+        t_start = self.era5_reader.valid_time_indices[0]
+        t_end = self.era5_reader.valid_time_indices[-1] + 1
+        nT = t_end - t_start
+
+        # 建议让 time_block 对齐 zarr 的 time chunk
+        # 比如：time_block = z.chunks[0] 或者它的倍数（内存允许的话）
+        # print("zarr chunks:", getattr(z, "chunks", None))
+
+        
+        # 建议你把 time_block 调大一点：16/32/64（看内存）
+        time_block = 64         # 先试 32，通常比 8 快
+        chan_block = 4          # upper_air 一次读 2 个通道；可试 4（更快但更吃内存）
+
+        n_blocks = (nT + time_block - 1) // time_block
+
+        for var in tqdm(self.gfs_vars, desc="ERA5 norm vars"):
+            era5_vars = self.era5_reader.gfs2era5_vars[var]
+            chan_indices = [self.era5_reader.channel_name2idx[v] for v in era5_vars]
+
+            sum_L = np.zeros((self.base_layers,), dtype=np.float64)
+            sumsq_L = np.zeros((self.base_layers,), dtype=np.float64)
+
+            # surface: 1 个通道；upper_air: 13 个通道
+            if len(chan_indices) == 1:
+                chan_groups = [chan_indices]
+                layer_groups = [np.array([0], dtype=int)]
+            else:
+                chan_groups = [chan_indices[i:i + chan_block] for i in range(0, len(chan_indices), chan_block)]
+                layer_groups = [np.arange(i, i + len(g), dtype=int) for i, g in zip(range(0, len(chan_indices), chan_block), chan_groups)]
+
+            pbar = tqdm(total=n_blocks * len(chan_groups), desc=f"{var} chunks", leave=False)
+
+            for g_chans, g_layers in zip(chan_groups, layer_groups):
+                for bi in range(n_blocks):
+                    b0 = t_start + bi * time_block
+                    b1 = min(b0 + time_block, t_end)
+
+                    # 关键：一次读多个 channel
+                    arr = z[b0:b1, g_chans, :, :]  # (Bt, Cg, H, W)
+                    arr = np.asarray(arr)          # 确保 numpy array
+                    np.nan_to_num(arr, nan=0.0, copy=False)
+
+                    # 直接按轴求和：对 time+H+W 聚合，保留 channel 维
+                    s = arr.sum(axis=(0, 2, 3), dtype=np.float64)                 # (Cg,)
+                    ss = (arr * arr).sum(axis=(0, 2, 3), dtype=np.float64)        # (Cg,)
+
+                    sum_L[g_layers] += s
+                    sumsq_L[g_layers] += ss
+
+                    pbar.update(1)
+
+            pbar.close()
+
+            total_count = nT * H * W
+            mean_L = sum_L / total_count
+            var_L = sumsq_L / total_count - mean_L * mean_L
+            var_L = np.maximum(var_L, 0.0)
+            std_L = np.sqrt(var_L) + self.eps
+
+            # surface pad
+            if len(chan_indices) == 1:
+                if self.pad_mode == "repeat":
+                    mean_L = np.repeat(mean_L[0], self.base_layers)
+                    std_L = np.repeat(std_L[0], self.base_layers)
+                elif self.pad_mode == "zero":
+                    mean_L[1:] = 0.0
+                    std_L[1:] = self.eps
+                else:
+                    raise ValueError("pad_mode must be 'repeat' or 'zero'")
+
+            params[var] = (mean_L.astype(np.float32), std_L.astype(np.float32))
+
         return params
 
-    def _norm(self, x: np.ndarray, var: str) -> np.ndarray:
-        mean, std = self.norm_params[var]
-        # x: (L,H,W) -> broadcast with (1,L,1,1) by adding axis
-        return (x[None, ...] - mean) / std  # (1,L,H,W)
+    def _norm(self, x_LHW: np.ndarray, var: str) -> np.ndarray:
+        """
+        x_LHW: (L,H,W)
+        使用 ERA5 统计得到的 mean/std: (L,)
+        返回: (L,H,W)
+        """
+        mean_L, std_L = self.norm_params[var]
+        mean = mean_L[:, None, None]
+        std = std_L[:, None, None]
+        return (x_LHW - mean) / std
 
     def __len__(self):
         return len(self.common_timestamps)
@@ -452,25 +589,24 @@ class GFSERA5PairDataset(Dataset):
         era5_vars_LVHW = []
 
         for var in self.gfs_vars:
-            g = self.gfs_reader.read_by_time(ts, [var])[var]   # (D,H,W)
-            e = self.era5_reader.read_by_time(ts, [var])[var]  # (D,H,W)
+            g = self.gfs_reader.read_by_time(ts, [var])[var]         # (D,H,W)
+            e = self.era5_reader.read_by_time(ts, [var], False)[var] # (D,H,W)
 
             g = pad_to_base_layers(g, self.base_layers, self.pad_mode)  # (L,H,W)
             e = pad_to_base_layers(e, self.base_layers, self.pad_mode)  # (L,H,W)
 
             if self.normalize:
-                g = self._norm(g, var)[0]  # back to (L,H,W)
-                e = self._norm(e, var)[0]
+                g = self._norm(g, var)
+                e = self._norm(e, var)
 
-            # 变成 (L,1,H,W)
-            gfs_vars_LVHW.append(torch.from_numpy(g).float().unsqueeze(1))
-            era5_vars_LVHW.append(torch.from_numpy(e).float().unsqueeze(1))
+            gfs_vars_LVHW.append(torch.from_numpy(g).float().unsqueeze(1))   # (L,1,H,W)
+            era5_vars_LVHW.append(torch.from_numpy(e).float().unsqueeze(1))  # (L,1,H,W)
 
-        # 合并变量维： (L,V,H,W)
-        gfs = torch.cat(gfs_vars_LVHW, dim=1)
-        era5 = torch.cat(era5_vars_LVHW, dim=1)
+        gfs = torch.cat(gfs_vars_LVHW, dim=1)   # (L,V,H,W)
+        era5 = torch.cat(era5_vars_LVHW, dim=1) # (L,V,H,W)
 
         return gfs, era5, ts_str
+
 
 def collate_fn(batch, base_layers: int = 13):
     """
@@ -510,17 +646,25 @@ if __name__ == "__main__":
     # 1. 初始化Reader
     gfs_reader = GFSReader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2020-01-02 18:00:00"
+        end_dt="2024-12-31 18:00:00"
     )
     era5_reader = ERA5Reader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2020-01-02 18:00:00"
+        end_dt="2024-12-31 18:00:00"
     )
     
     # 2. 选择要训练的变量（可根据需求调整）
     train_vars = [
-        "Temperature",              # 13层
-        "10 metre U wind component" # 1层
+        "Temperature",
+        "2 metre temperature",
+        "10 metre U wind component",
+        "100 metre U wind component",
+        "10 metre V wind component",
+        "100 metre V wind component",
+        "U component of wind",
+        "V component of wind",
+        "Geopotential height",
+        "2 metre dewpoint temperature"
     ]
     
     # 3. 初始化数据集
@@ -528,9 +672,10 @@ if __name__ == "__main__":
         gfs_reader=gfs_reader,
         era5_reader=era5_reader,
         gfs_vars=train_vars,
-        normalize=False,
+        normalize=True,
+        norm_cache_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/era5_norm_1_8.npz",
         base_layers=13,
-        pad_mode="repeat"  # 推荐用repeat（物理意义更合理）
+        pad_mode="repeat",
     )
     
     # 4. 测试单样本
