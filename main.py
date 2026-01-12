@@ -2,10 +2,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
-
+import random
 from trainers.basetrain import BaseTrainer
 from models.vaebase import G2EVAE
-from .data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
+from data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
 
 
 def set_random_seed(seed, rank):
