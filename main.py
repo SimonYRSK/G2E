@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import Dataset, Dataloader
+from torch.utils.data import Dataset, DataLoader
 from timm.layers.helpers import to_2tuple
 from timm.models.swin_transformer_v2 import SwinTransformerV2Stage
 
@@ -78,7 +78,7 @@ def train(rank, worldsize):
         temporal_pair=True,
     )
 
-    print(f"✅ 数据集初始化完成，共 {len(dataset)} 个样本")
+    print(f"✅ 数据集初始化完成")
 
     batch_size = 2
     train_dataloader = DataLoader(
@@ -103,7 +103,7 @@ def train(rank, worldsize):
 
     optimizer = torch.optim.Adam(
         model.parameters(), 
-        lr=1e-4 * world_size,
+        lr=1e-4 * worldsize,
         weight_decay=1e-5, 
         betas=(0.9, 0.999)
     )

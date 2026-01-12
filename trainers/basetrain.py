@@ -1,5 +1,5 @@
 from tqdm import tqdm
-
+import torch
 
 class BaseTrainer:
     def __init__(self, model, train_loader, test_loader, optimizer, scheduler, epochs, device, beta):
@@ -13,13 +13,14 @@ class BaseTrainer:
         self.beta = beta
 
     def cal_losses(self, x, y, mu, logvar):
-        kl_loss = 
-        recon_loss = (x_recon - x) ** 2
+        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        
+        recon_loss = torch.mean((x - y) ** 2)
 
         return kl_loss, recon_loss
 
     def train_one_epoch(self, epoch):
-        model.train()
+        self.model.train()
         total_loss = 0
         total_recon_loss = 0.0
         total_kl_loss = 0.0
@@ -27,12 +28,12 @@ class BaseTrainer:
         pbar = tqdm(self.trainlo, desc=f"Epoch {epoch+1}/{self.epochs}")
 
         for batch_idx, (x, y, t) in enumerate(pbar):
-            x = x.to(device)
-            y = y.to(device)
-            t = t.to(device)
+            x = x.to(self.device)
+            y = y.to(self.device)
+            t = t.to(self.device)
 
             x_recon, mu, log_var = self.model(x)
-            kl_loss, recon_loss = cal_losses(x_recon, y, mu, log_var)
+            kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var)
             loss = kl_loss * self.beta + recon_loss
 
             total_loss += loss
@@ -60,7 +61,7 @@ class BaseTrainer:
 
     def train(self):
         for epoch in range(self.epochs):
-            train_one_epoch(epoch)
+            self.train_one_epoch(epoch)
 
 
 
