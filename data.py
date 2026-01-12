@@ -400,49 +400,51 @@ class GFSERA5PairDataset(Dataset):
                 self.norm_params, _ = _load_norm_npz(cache_path)
                 #print(f"✅ 读取标准化缓存：{cache_path}")
             else:
-                self.norm_params = self._compute_era5_norm_params_over_full_period()
-                meta = {
-                    "start_dt": self.era5_reader.start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "end_dt": self.era5_reader.end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "base_layers": str(self.base_layers),
-                    "pad_mode": str(self.pad_mode),
-                }
-                _save_norm_npz(cache_path, self.norm_params, meta)
+                print("需要标准化文件！")
+                return
+                # self.norm_params = self._compute_era5_norm_params_over_full_period()
+                # meta = {
+                #     "start_dt": self.era5_reader.start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                #     "end_dt": self.era5_reader.end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                #     "base_layers": str(self.base_layers),
+                #     "pad_mode": str(self.pad_mode),
+                # }
+                # _save_norm_npz(cache_path, self.norm_params, meta)
                 #print(f"✅ 已保存标准化缓存：{cache_path}")
 
-    def _compute_era5_norm_params_over_full_period(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-        params = {}
-        era5_times = list(self.era5_reader.time_index)
-        if len(era5_times) == 0:
-            raise ValueError("ERA5Reader.time_index 为空，无法统计标准化参数")
+    # def _compute_era5_norm_params_over_full_period(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    #     params = {}
+    #     era5_times = list(self.era5_reader.time_index)
+    #     if len(era5_times) == 0:
+    #         raise ValueError("ERA5Reader.time_index 为空，无法统计标准化参数")
 
-        for var in self.gfs_vars:
-            sum_L = np.zeros((self.base_layers,), dtype=np.float64)
-            sumsq_L = np.zeros((self.base_layers,), dtype=np.float64)
-            count_per_layer = 0
+    #     for var in self.gfs_vars:
+    #         sum_L = np.zeros((self.base_layers,), dtype=np.float64)
+    #         sumsq_L = np.zeros((self.base_layers,), dtype=np.float64)
+    #         count_per_layer = 0
 
-            for ts in era5_times:
-                e = self.era5_reader.read_by_time(ts, [var], verbose=False)[var]
-                e = pad_to_base_layers(e, self.base_layers, self.pad_mode)
-                e = np.nan_to_num(e, nan=0.0)
+    #         for ts in era5_times:
+    #             e = self.era5_reader.read_by_time(ts, [var], verbose=False)[var]
+    #             e = pad_to_base_layers(e, self.base_layers, self.pad_mode)
+    #             e = np.nan_to_num(e, nan=0.0)
 
-                L, H, W = e.shape
-                if count_per_layer == 0:
-                    count_per_layer = H * W
+    #             L, H, W = e.shape
+    #             if count_per_layer == 0:
+    #                 count_per_layer = H * W
 
-                flat = e.reshape(L, -1).astype(np.float64)
-                sum_L += flat.sum(axis=1)
-                sumsq_L += (flat * flat).sum(axis=1)
+    #             flat = e.reshape(L, -1).astype(np.float64)
+    #             sum_L += flat.sum(axis=1)
+    #             sumsq_L += (flat * flat).sum(axis=1)
 
-            total_count = len(era5_times) * count_per_layer
-            mean_L = sum_L / total_count
-            var_L = sumsq_L / total_count - mean_L * mean_L
-            var_L = np.maximum(var_L, 0.0)
-            std_L = np.sqrt(var_L) + self.eps
+    #         total_count = len(era5_times) * count_per_layer
+    #         mean_L = sum_L / total_count
+    #         var_L = sumsq_L / total_count - mean_L * mean_L
+    #         var_L = np.maximum(var_L, 0.0)
+    #         std_L = np.sqrt(var_L) + self.eps
 
-            params[var] = (mean_L.astype(np.float32), std_L.astype(np.float32))
+    #         params[var] = (mean_L.astype(np.float32), std_L.astype(np.float32))
 
-        return params
+    #     return params
 
     def _norm(self, x_LHW: np.ndarray, var: str) -> np.ndarray:
         mean_L, std_L = self.norm_params[var]
@@ -476,8 +478,6 @@ class GFSERA5PairDataset(Dataset):
                 if self.normalize:
                     g_prev = self._norm(g_prev, var)
                     g_curr = self._norm(g_curr, var)
-                    e_prev = self._norm(e_prev, var)
-                    e_curr = self._norm(e_curr, var)
 
                 g_prev_arrays.append(g_prev)  # (L,H,W)
                 g_curr_arrays.append(g_curr)
@@ -510,7 +510,6 @@ class GFSERA5PairDataset(Dataset):
             e = pad_to_base_layers(era5_dict[var], self.base_layers, self.pad_mode)
             if self.normalize:
                 g = self._norm(g, var)
-                e = self._norm(e, var)
             gfs_arrays.append(g)
             era5_arrays.append(e)
 
