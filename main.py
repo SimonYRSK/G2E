@@ -61,7 +61,6 @@ def main():
         norm_cache_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/era5_norm_1_8.npz",
         base_layers=13,
         pad_mode="repeat",
-        temporal_pair=True,
     )
 
     test_dataset = GFSERA5PairDataset(
@@ -72,7 +71,6 @@ def main():
         norm_cache_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/era5_norm_1_8.npz",
         base_layers=13,
         pad_mode="repeat",
-        temporal_pair=True,
     )
 
     print(f"✅ 数据集初始化完成")

@@ -28,9 +28,9 @@ class BaseTrainer:
         pbar = tqdm(self.trainlo, desc=f"Epoch {epoch+1}/{self.epochs}")
 
         for batch_idx, (x, y, t) in enumerate(pbar):
-            x = x.to(self.device)
-            y = y.to(self.device)
-            t = t.to(self.device)
+            x = x.unsqueeze(2).to(self.device)
+            y = y.unsqueeze(2).to(self.device)
+            #t = t.to(self.device)
 
             x_recon, mu, log_var = self.model(x)
             kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var)
