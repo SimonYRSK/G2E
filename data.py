@@ -126,9 +126,9 @@ class ERA5Reader:
             self.channel_name2idx = {name: idx for idx, name in enumerate(self.channel_names)}
             self.valid_time_indices = self._time_filter()
             
-            print(f"✅ ERA5加载完成：")
-            print(f"   有效时间步：{len(self.valid_time_indices)}个（{self.start_dt}~{self.end_dt}）")
-            print(f"   总通道数：{self.n_channels}，空间维度：{self.lat_size}×{self.lon_size}")
+            # print(f"✅ ERA5加载完成：")
+            # print(f"   有效时间步：{len(self.valid_time_indices)}个（{self.start_dt}~{self.end_dt}）")
+            # print(f"   总通道数：{self.n_channels}，空间维度：{self.lat_size}×{self.lon_size}")
         
         except Exception as e:
             raise RuntimeError(f"加载ERA5 Zarr失败：{str(e)}")
@@ -243,10 +243,10 @@ class GFSReader:
                 self.lat_len = ds.dims['lat']
                 self.lon_len = ds.dims['lon']
                 
-                print(f"✅ GFS Zarr加载完成：路径={self.gfs_root}")
-                print(f"   GFS总时间范围：{self.full_time_index[0]} ~ {self.full_time_index[-1]}")
-                print(f"   GFS总时间步：{len(self.full_time_index)}")
-                print(f"   GFS空间维度：lat={self.lat_len}, lon={self.lon_len}")
+                # print(f"✅ GFS Zarr加载完成：路径={self.gfs_root}")
+                # print(f"   GFS总时间范围：{self.full_time_index[0]} ~ {self.full_time_index[-1]}")
+                # print(f"   GFS总时间步：{len(self.full_time_index)}")
+                # print(f"   GFS空间维度：lat={self.lat_len}, lon={self.lon_len}")
         
         except Exception as e:
             raise RuntimeError(f"加载GFS Zarr失败：{str(e)}")
@@ -260,7 +260,7 @@ class GFSReader:
             raise ValueError(f"GFS无有效时间数据：{self.start_dt}~{self.end_dt}")
         
         self.time_index = pd.DatetimeIndex(self.valid_time_stamps)
-        print(f"✅ GFS有效时间步：{len(self.valid_time_indices)}个（{self.start_dt}~{self.end_dt}）")
+        #print(f"✅ GFS有效时间步：{len(self.valid_time_indices)}个（{self.start_dt}~{self.end_dt}）")
 
     def _get_nearest_time_idx(self, target_time: datetime) -> Tuple[int, datetime]:
         time_diffs = [abs((ts - target_time).total_seconds()) for ts in self.valid_time_stamps]
@@ -398,7 +398,7 @@ class GFSERA5PairDataset(Dataset):
 
             if cache_path.exists():
                 self.norm_params, _ = _load_norm_npz(cache_path)
-                print(f"✅ 读取标准化缓存：{cache_path}")
+                #print(f"✅ 读取标准化缓存：{cache_path}")
             else:
                 self.norm_params = self._compute_era5_norm_params_over_full_period()
                 meta = {
@@ -408,7 +408,7 @@ class GFSERA5PairDataset(Dataset):
                     "pad_mode": str(self.pad_mode),
                 }
                 _save_norm_npz(cache_path, self.norm_params, meta)
-                print(f"✅ 已保存标准化缓存：{cache_path}")
+                #print(f"✅ 已保存标准化缓存：{cache_path}")
 
     def _compute_era5_norm_params_over_full_period(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
         params = {}
@@ -470,8 +470,8 @@ class GFSERA5PairDataset(Dataset):
             for var in self.gfs_vars:
                 g_prev = pad_to_base_layers(g_prev_dict[var], self.base_layers, self.pad_mode)
                 g_curr = pad_to_base_layers(g_curr_dict[var], self.base_layers, self.pad_mode)
-                e_prev = pad_to_base_layers(e_prev_dict[var], self.base_layers, self.pad_mode)
-                e_curr = pad_to_base_layers(e_curr_dict[var], self.base_layers, self.pad_mode)
+                e_curr = pad_to_base_layers(e_curr_dict[var], self.baselayers, self.pad_mode)
+                e_prev = pad_to_base_layers(e_prev_dict[var], self.base__layers, self.pad_mode)
 
                 if self.normalize:
                     g_prev = self._norm(g_prev, var)
@@ -603,7 +603,6 @@ if __name__ == "__main__":
         norm_cache_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/era5_norm_1_8.npz",
         base_layers=13,
         pad_mode="repeat",
-        temporal_pair=True,
     )
     
     print(f"✅ 数据集初始化完成，共 {len(dataset)} 个样本")

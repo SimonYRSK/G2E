@@ -156,8 +156,8 @@ class UTransformer(nn.Module):
 
 class G2EBase(nn.Module):
     def __init__(self, 
-                 img_size=(2, 721, 1440), 
-                 patch_size=(2, 4, 4), 
+                 img_size=(1, 721, 1440), 
+                 patch_size=(1, 4, 4), 
                  in_chans=10, 
                  out_chans=10,
                  embed_dim=864, 

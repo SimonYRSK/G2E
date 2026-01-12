@@ -4,6 +4,7 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset, DataLoader
 import random
 from trainers.basetrain import BaseTrainer
+from trainers.amptrain import AMPTrainer
 from models.vaebase import G2EVAE
 from data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
 
@@ -75,12 +76,12 @@ def main():
 
     print(f"✅ 数据集初始化完成")
 
-    batch_size = 2
+    batch_size = 1
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=2,
         collate_fn=lambda x: collate_fn(x, base_layers=13)
     )
 
@@ -88,12 +89,12 @@ def main():
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=2,
         collate_fn=lambda x: collate_fn(x, base_layers=13)
     )
     print("dataloader加载完毕")
 
-    model = G2EVAE(embed_dim=864, num_heads=8, window_size=7, latent_dim=864).to(device)
+    model = G2EVAE(embed_dim=512, num_heads=8, window_size=7, depth = 8, latent_dim=512).to(device)
 
 
     optimizer = torch.optim.Adam(
@@ -108,7 +109,7 @@ def main():
         eta_min=1e-6
     )
 
-    trainer = BaseTrainer(
+    trainer = AMPTrainer(
         model = model,
         train_loader = train_dataloader,
         test_loader = test_dataloader,
