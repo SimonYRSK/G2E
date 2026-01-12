@@ -13,8 +13,8 @@ class BaseTrainer:
         self.beta = beta
 
     def cal_losses(self, x, y, mu, logvar):
-        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         
+        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         recon_loss = torch.mean((x - y) ** 2)
 
         return kl_loss, recon_loss
