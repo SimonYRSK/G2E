@@ -126,7 +126,7 @@ if __name__ == "__main__":
     print(f"input: {input.shape}")
     model = G2EVAE().to(device)
 
-    output = model(input)
+    output, _, _ = model(input)
 
     print(f"output: {output.shape}")
 
