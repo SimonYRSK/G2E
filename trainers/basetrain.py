@@ -13,11 +13,8 @@ class BaseTrainer:
         self.beta = beta
 
     def cal_losses(self, x, y, mu, logvar):
-
         kl_loss = 
-
         recon_loss = (x_recon - x) ** 2
-
 
         return kl_loss, recon_loss
 
@@ -35,9 +32,7 @@ class BaseTrainer:
             t = t.to(device)
 
             x_recon, mu, log_var = self.model(x)
-
             kl_loss, recon_loss = cal_losses(x_recon, y, mu, log_var)
-
             loss = kl_loss * self.beta + recon_loss
 
             total_loss += loss
@@ -45,7 +40,6 @@ class BaseTrainer:
             total_kl_loss += kl_loss
 
             self.opt.zero_grad()
-
             loss.backward()
 
             pbar.set_postfix({
@@ -54,7 +48,6 @@ class BaseTrainer:
                 'KL': f'{kl_loss.item():.4f}',
             })
 
-
             self.opt.step()
         
         self.sch.step()
@@ -62,10 +55,8 @@ class BaseTrainer:
         avg_loss = total_loss / len(self.trainlo)
         avg_recon = total_recon_loss / len(self.trainlo)
         avg_kl = total_kl_loss / len(self.trainlo)
-
         print(f"\nEpoch {epoch+1} 训练集平均:")
-        print(f"总损失={avg_loss:.5f}, 重建={avg_recon:.5f}, 散度={avg_kl:.5f}")
-        
+        print(f"总损失={avg_loss:.5f}, 重建={avg_recon:.5f}, 散度={avg_kl:.5f}")   
 
     def train(self):
         for epoch in range(self.epochs):
