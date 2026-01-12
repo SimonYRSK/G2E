@@ -1,8 +1,9 @@
 from .basetrain import BaseTrainer
 import torch
+from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 
-class AmpTrainer(BaseTrainer):
+class AMPTrainer(BaseTrainer):
     def __init__(self, model, train_loader, test_loader, optimizer, scheduler, epochs, device, beta):
         super().__init__(model, train_loader, test_loader, optimizer, scheduler, epochs, device, beta)
         # 只有 cuda 时启用 amp
@@ -23,7 +24,7 @@ class AmpTrainer(BaseTrainer):
 
             self.opt.zero_grad(set_to_none=True)
 
-            with autocast(device_type="cuda", enabled=str(self.device).startswith("cuda")):
+            with autocast(enabled=str(self.device).startswith("cuda")):
                 x_recon, mu, log_var = self.model(x)
                 kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var)
                 loss = kl_loss * self.beta + recon_loss

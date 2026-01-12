@@ -132,7 +132,7 @@ class UTransformer(nn.Module):
         input_resolution[1] = input_resolution[1] + padding_left + padding_right
         
         self.down = DownBlock(embed_dim, embed_dim, num_groups[0])
-        self.layer = SwinTransformerV2Stage(embed_dim, embed_dim, input_resolution, depth, num_heads, window_size)
+        self.layer = SwinTransformerV2Stage(embed_dim, embed_dim, input_resolution, depth, num_heads, window_size, use_checkpoint=True)
         self.up = UpBlock(embed_dim * 2, embed_dim, num_groups[1])
 
     def forward(self, x):

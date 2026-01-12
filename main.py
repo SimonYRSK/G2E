@@ -94,7 +94,7 @@ def main():
     )
     print("dataloader加载完毕")
 
-    model = G2EVAE(embed_dim=512, num_heads=8, window_size=7, depth = 8, latent_dim=512).to(device)
+    model = G2EVAE(embed_dim=384, num_heads=6, window_size=7, depth = 4, latent_dim=384).to(device)
 
 
     optimizer = torch.optim.Adam(
