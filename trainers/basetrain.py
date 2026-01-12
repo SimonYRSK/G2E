@@ -29,7 +29,7 @@ class BaseTrainer:
 
         for batch_idx, (x, y, t) in enumerate(pbar):
             x = x.unsqueeze(2).to(self.device)
-            y = y.unsqueeze(2).to(self.device)
+            y = yto(self.device)
             #t = t.to(self.device)
 
             x_recon, mu, log_var = self.model(x)

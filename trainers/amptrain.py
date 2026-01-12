@@ -20,7 +20,7 @@ class AMPTrainer(BaseTrainer):
         for batch_idx, (x, y, t) in enumerate(pbar):
             # 你的数据: (N, C, H, W) → 加 T=1 维
             x = x.unsqueeze(2).to(self.device)
-            y = y.unsqueeze(2).to(self.device)
+            y = y.to(self.device)
 
             self.opt.zero_grad(set_to_none=True)
 

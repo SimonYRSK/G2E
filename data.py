@@ -564,64 +564,194 @@ def collate_fn(batch, base_layers: int = 13):
 
     raise ValueError(f"不支持的样本形状: {tuple(first.shape)}")
 
-
-if __name__ == "__main__":
-    import time
-    from tqdm.auto import tqdm
+def check_era5_units():
+    """检查 ERA5 数据的单位和元数据"""
+    import zarr
+    
+    era5_path = Path("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/dataset/era5.2002_2024.c85.p25.h6")
     
     print("=" * 60)
-    print("开始初始化 Reader...")
+    print("检查 ERA5 Zarr 结构:")
+    
+    try:
+        root = zarr.open(era5_path, mode='r')
+        print(f"根目录内容: {list(root.keys())}")
+        
+        # 检查 data array 的属性
+        if 'data' in root:
+            data_arr = root['data']
+            print(f"\ndata shape: {data_arr.shape}")
+            print(f"data dtype: {data_arr.dtype}")
+            print(f"data attrs: {dict(data_arr.attrs)}")
+        
+        # 检查 channel 信息
+        if 'channel' in root:
+            channel_arr = root['channel']
+            channels = channel_arr[:]
+            channel_names = []
+            for name in channels:
+                if isinstance(name, bytes):
+                    channel_names.append(name.decode('utf-8'))
+                else:
+                    channel_names.append(str(name))
+            
+            print(f"\n通道数量: {len(channel_names)}")
+            print(f"前10个通道: {channel_names[:10]}")
+            
+            # 找温度相关的通道
+            temp_channels = [c for c in channel_names if 't' in c.lower()]
+            print(f"\n温度相关通道: {temp_channels[:20]}")
+        
+        # 检查是否有单独的 units 或 metadata
+        for key in ['units', 'metadata', 'attrs', 'variables']:
+            if key in root:
+                print(f"\n{key}: {root[key][:]}")
+        
+        # 采样实际数据查看数值范围
+        print("\n" + "=" * 60)
+        print("采样数据数值范围:")
+        
+        era5_reader = ERA5Reader(
+            start_dt="2020-01-01 00:00:00",
+            end_dt="2020-01-01 06:00:00"
+        )
+        
+        # 检查几个温度通道
+        temp_vars = ["Temperature", "2 metre temperature"]
+        ts = era5_reader.time_index[0]
+        
+        for var in temp_vars:
+            try:
+                data = era5_reader.read_by_time(ts, [var])
+                arr = data[var]
+                print(f"\n{var}:")
+                print(f"  Shape: {arr.shape}")
+                print(f"  Range: [{arr.min():.4f}, {arr.max():.4f}]")
+                print(f"  Mean: {arr.mean():.4f}, Std: {arr.std():.4f}")
+                print(f"  Sample values: {arr[0, 100:105, 100]}")
+            except Exception as e:
+                print(f"  无法读取 {var}: {e}")
+                
+    except Exception as e:
+        print(f"错误: {e}")
+        import traceback
+        traceback.print_exc()
+
+def validate_alignment():
+    """验证 GFS 和 ERA5 的时间和空间对齐"""
     gfs_reader = GFSReader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2024-12-31 18:00:00"
+        end_dt="2020-01-05 00:00:00"
     )
     era5_reader = ERA5Reader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2024-12-31 18:00:00"
+        end_dt="2020-01-05 00:00:00"
     )
-    
-    train_vars = [
-        "Temperature",
-        "2 metre temperature",
-        "10 metre U wind component",
-        "100 metre U wind component",
-        "10 metre V wind component",
-        "100 metre V wind component",
-        "U component of wind",
-        "V component of wind",
-        "Geopotential height",
-        "2 metre dewpoint temperature"
-    ]
     
     print("=" * 60)
-    print("开始初始化数据集...")
-    dataset = GFSERA5PairDataset(
-        gfs_reader=gfs_reader,
-        era5_reader=era5_reader,
-        gfs_vars=train_vars,
-        normalize=True,
-        norm_cache_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/era5_norm_1_8.npz",
-        base_layers=13,
-        pad_mode="repeat",
-    )
+    print("空间维度检查:")
+    print(f"GFS  空间：{gfs_reader.lat_len} × {gfs_reader.lon_len}")
+    print(f"ERA5 空间：{era5_reader.lat_size} × {era5_reader.lon_size}")
+    if gfs_reader.lat_len == era5_reader.lat_size and gfs_reader.lon_len == era5_reader.lon_size:
+        print("✅ 空间对齐")
+    else:
+        print("❌ 空间不对齐!")
     
-    print(f"✅ 数据集初始化完成，共 {len(dataset)} 个样本")
+    print("\n" + "=" * 60)
+    print("时间范围检查:")
+    print(f"GFS  时间范围：{gfs_reader.time_index[0]} ~ {gfs_reader.time_index[-1]}")
+    print(f"ERA5 时间范围：{era5_reader.time_index[0]} ~ {era5_reader.time_index[-1]}")
+    
+    print("\n" + "=" * 60)
+    print("共同时间戳检查:")
+    gfs_times = set(gfs_reader.time_index)
+    era5_times = set(era5_reader.time_index)
+    common = sorted(list(gfs_times & era5_times))
+    print(f"GFS  时间步数：{len(gfs_reader.time_index)}")
+    print(f"ERA5 时间步数：{len(era5_reader.time_index)}")
+    print(f"共同时间步数：{len(common)}")
+    if len(common) == 0:
+        print("❌ 没有共同时间戳!")
+    else:
+        print(f"✅ 有 {len(common)} 个共同时间戳")
+        print(f"   首个共同：{common[0]}")
+        print(f"   最后共同：{common[-1]}")
+    
+    print("\n" + "=" * 60)
+    print("数据内容检查(采样一个时间戳):")
+    if common:
+        ts = common[0]
+        gfs_data = gfs_reader.read_by_time(ts, ["Temperature"])
+        era5_data = era5_reader.read_by_time(ts, ["Temperature"])
+        
+        g = gfs_data["Temperature"]
+        e = era5_data["Temperature"]
+        print(f"GFS  Temperature shape: {g.shape}")
+        print(f"ERA5 Temperature shape: {e.shape}")
+        print(f"GFS  数据范围: [{g.min():.2f}, {g.max():.2f}]")
+        print(f"ERA5 数据范围: [{e.min():.2f}, {e.max():.2f}]")
+
+if __name__ == "__main__":
+    check_era5_units()
+    validate_alignment()
+
+# if __name__ == "__main__":
+#     import time
+#     from tqdm.auto import tqdm
+    
+#     print("=" * 60)
+#     print("开始初始化 Reader...")
+#     gfs_reader = GFSReader(
+#         start_dt="2020-01-01 00:00:00",
+#         end_dt="2024-12-31 18:00:00"
+#     )
+#     era5_reader = ERA5Reader(
+#         start_dt="2020-01-01 00:00:00",
+#         end_dt="2024-12-31 18:00:00"
+#     )
+    
+#     train_vars = [
+#         "Temperature",
+#         "2 metre temperature",
+#         "10 metre U wind component",
+#         "100 metre U wind component",
+#         "10 metre V wind component",
+#         "100 metre V wind component",
+#         "U component of wind",
+#         "V component of wind",
+#         "Geopotential height",
+#         "2 metre dewpoint temperature"
+#     ]
+    
+#     print("=" * 60)
+#     print("开始初始化数据集...")
+#     dataset = GFSERA5PairDataset(
+#         gfs_reader=gfs_reader,
+#         era5_reader=era5_reader,
+#         gfs_vars=train_vars,
+#         normalize=True,
+#         norm_cache_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/era5_norm_1_8.npz",
+#         base_layers=13,
+#         pad_mode="repeat",
+#     )
+    
+#     print(f"✅ 数据集初始化完成，共 {len(dataset)} 个样本")
 
     
-    batch_size = 2
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        collate_fn=lambda x: collate_fn(x, base_layers=13)
-    )
-    print("dataloader加载完毕")
+#     batch_size = 2
+#     dataloader = DataLoader(
+#         dataset,
+#         batch_size=batch_size,
+#         shuffle=False,
+#         num_workers=0,
+#         collate_fn=lambda x: collate_fn(x, base_layers=13)
+#     )
+#     print("dataloader加载完毕")
 
-    for batch_idx, (gfs_batch, era5_batch, ts_batch) in enumerate(dataloader):
-        print("gfs_batch shape:", tuple(gfs_batch.shape))   # (B*13, V, 2, 721, 1440)
-        print("era5_batch shape:", tuple(era5_batch.shape)) # (B*13, V, 2, 721, 1440)
-        print("ts pairs sample:", ts_batch[:2])
-        break
+#     for batch_idx, (gfs_batch, era5_batch, ts_batch) in enumerate(dataloader):
+#         print("gfs_batch shape:", tuple(gfs_batch.shape))   # (B*13, V, 2, 721, 1440)
+#         print("era5_batch shape:", tuple(era5_batch.shape)) # (B*13, V, 2, 721, 1440)
+#         print("ts pairs sample:", ts_batch[:2])
+#         break
     
     
