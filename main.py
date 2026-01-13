@@ -8,6 +8,7 @@ from trainers.amptrain import AMPTrainer
 from trainers.ddptrain import DDPTrainer
 from trainers.fsdptrain import FSDPTrainer
 from models.vaebase import G2EVAE
+from models.vaeunet import VAEUNet
 from data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
 
 
@@ -96,8 +97,14 @@ def main():
     )
     print("dataloader加载完毕")
 
-    model = G2EVAE(embed_dim=768, num_heads=6, window_size=7, depth = 8, latent_dim=768).to(device)
-
+    model = VAEUNet(
+        in_ch=10,
+        out_ch=10,
+        widths=(64, 128, 256),
+        res_blocks_per_stage=(4, 4, 4),
+        use_attn=True,
+        attn_cfg={"stages": [False, True, True], "nhead": 8, "stride": 4, "ff_mult": 4, "depth": 2},
+    ).to(device)
 
     optimizer = torch.optim.Adam(
         model.parameters(), 
