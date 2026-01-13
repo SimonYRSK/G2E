@@ -320,11 +320,13 @@ def pad_to_base_layers(data: np.ndarray, base_layers: int = 13, pad_mode: str = 
     else:
         raise ValueError("pad_mode must be 'repeat' or 'zero'")
 
-def _default_norm_cache_path(era5_reader, gfs_vars: List[str], base_layers: int, pad_mode: str) -> Path:
-    start_str = era5_reader.start_dt.strftime("%Y%m%d%H")
-    end_str = era5_reader.end_dt.strftime("%Y%m%d%H")
-    fname = f"era5_norm_{start_str}_{end_str}_L{base_layers}_{pad_mode}_V{len(gfs_vars)}.npz"
-    return Path(__file__).resolve().parent / fname
+def _default_norm_cache_path(gfs_reader, gfs_vars: List[str], base_layers: int, pad_mode: str) -> Path:
+    start_str = gfs_reader.start_dt.strftime("%Y%m%d%H")
+    end_str = gfs_reader.end_dt.strftime("%Y%m%d%H")
+    fname = f"gfs_norm_{start_str}_{end_str}_L{base_layers}_{pad_mode}_V{len(gfs_vars)}.npz"
+    # 使用新的标准化路径
+    cache_dir = Path("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/gfs_norm_2020_2024.npz")
+    return cache_dir / fname
 
 
 def _save_norm_npz(path: Path, params: Dict[str, Tuple[np.ndarray, np.ndarray]], meta: Dict[str, str]):
@@ -390,7 +392,7 @@ class GFSERA5PairDataset(Dataset):
         self.norm_params: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None
         if self.normalize:
             cache_path = Path(norm_cache_path) if norm_cache_path else _default_norm_cache_path(
-                era5_reader=self.era5_reader,
+                gfs_reader=self.gfs_reader,  # 改为 gfs_reader
                 gfs_vars=self.gfs_vars,
                 base_layers=self.base_layers,
                 pad_mode=self.pad_mode,
@@ -402,49 +404,7 @@ class GFSERA5PairDataset(Dataset):
             else:
                 print("需要标准化文件！")
                 return
-                # self.norm_params = self._compute_era5_norm_params_over_full_period()
-                # meta = {
-                #     "start_dt": self.era5_reader.start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                #     "end_dt": self.era5_reader.end_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                #     "base_layers": str(self.base_layers),
-                #     "pad_mode": str(self.pad_mode),
-                # }
-                # _save_norm_npz(cache_path, self.norm_params, meta)
-                #print(f"✅ 已保存标准化缓存：{cache_path}")
-
-    # def _compute_era5_norm_params_over_full_period(self) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-    #     params = {}
-    #     era5_times = list(self.era5_reader.time_index)
-    #     if len(era5_times) == 0:
-    #         raise ValueError("ERA5Reader.time_index 为空，无法统计标准化参数")
-
-    #     for var in self.gfs_vars:
-    #         sum_L = np.zeros((self.base_layers,), dtype=np.float64)
-    #         sumsq_L = np.zeros((self.base_layers,), dtype=np.float64)
-    #         count_per_layer = 0
-
-    #         for ts in era5_times:
-    #             e = self.era5_reader.read_by_time(ts, [var], verbose=False)[var]
-    #             e = pad_to_base_layers(e, self.base_layers, self.pad_mode)
-    #             e = np.nan_to_num(e, nan=0.0)
-
-    #             L, H, W = e.shape
-    #             if count_per_layer == 0:
-    #                 count_per_layer = H * W
-
-    #             flat = e.reshape(L, -1).astype(np.float64)
-    #             sum_L += flat.sum(axis=1)
-    #             sumsq_L += (flat * flat).sum(axis=1)
-
-    #         total_count = len(era5_times) * count_per_layer
-    #         mean_L = sum_L / total_count
-    #         var_L = sumsq_L / total_count - mean_L * mean_L
-    #         var_L = np.maximum(var_L, 0.0)
-    #         std_L = np.sqrt(var_L) + self.eps
-
-    #         params[var] = (mean_L.astype(np.float32), std_L.astype(np.float32))
-
-    #     return params
+                
 
     def _norm(self, x_LHW: np.ndarray, var: str) -> np.ndarray:
         mean_L, std_L = self.norm_params[var]
@@ -472,8 +432,8 @@ class GFSERA5PairDataset(Dataset):
             for var in self.gfs_vars:
                 g_prev = pad_to_base_layers(g_prev_dict[var], self.base_layers, self.pad_mode)
                 g_curr = pad_to_base_layers(g_curr_dict[var], self.base_layers, self.pad_mode)
-                e_curr = pad_to_base_layers(e_curr_dict[var], self.baselayers, self.pad_mode)
-                e_prev = pad_to_base_layers(e_prev_dict[var], self.base__layers, self.pad_mode)
+                e_curr = pad_to_base_layers(e_curr_dict[var], self.base_layers, self.pad_mode)
+                e_prev = pad_to_base_layers(e_prev_dict[var], self.base_layers, self.pad_mode)
 
                 if self.normalize:
                     g_prev = self._norm(g_prev, var)
@@ -563,81 +523,11 @@ def collate_fn(batch, base_layers: int = 13):
 
     raise ValueError(f"不支持的样本形状: {tuple(first.shape)}")
 
-def check_era5_units():
-    """检查 ERA5 数据的单位和元数据"""
-    import zarr
-    
-    era5_path = Path("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/dataset/era5.2002_2024.c85.p25.h6")
-    
-    print("=" * 60)
-    print("检查 ERA5 Zarr 结构:")
-    
-    try:
-        root = zarr.open(era5_path, mode='r')
-        print(f"根目录内容: {list(root.keys())}")
-        
-        # 检查 data array 的属性
-        if 'data' in root:
-            data_arr = root['data']
-            print(f"\ndata shape: {data_arr.shape}")
-            print(f"data dtype: {data_arr.dtype}")
-            print(f"data attrs: {dict(data_arr.attrs)}")
-        
-        # 检查 channel 信息
-        if 'channel' in root:
-            channel_arr = root['channel']
-            channels = channel_arr[:]
-            channel_names = []
-            for name in channels:
-                if isinstance(name, bytes):
-                    channel_names.append(name.decode('utf-8'))
-                else:
-                    channel_names.append(str(name))
-            
-            print(f"\n通道数量: {len(channel_names)}")
-            print(f"前10个通道: {channel_names[:10]}")
-            
-            # 找温度相关的通道
-            temp_channels = [c for c in channel_names if 't' in c.lower()]
-            print(f"\n温度相关通道: {temp_channels[:20]}")
-        
-        # 检查是否有单独的 units 或 metadata
-        for key in ['units', 'metadata', 'attrs', 'variables']:
-            if key in root:
-                print(f"\n{key}: {root[key][:]}")
-        
-        # 采样实际数据查看数值范围
-        print("\n" + "=" * 60)
-        print("采样数据数值范围:")
-        
-        era5_reader = ERA5Reader(
-            start_dt="2020-01-01 00:00:00",
-            end_dt="2020-01-01 06:00:00"
-        )
-        
-        # 检查几个温度通道
-        temp_vars = ["Temperature", "2 metre temperature"]
-        ts = era5_reader.time_index[0]
-        
-        for var in temp_vars:
-            try:
-                data = era5_reader.read_by_time(ts, [var])
-                arr = data[var]
-                print(f"\n{var}:")
-                print(f"  Shape: {arr.shape}")
-                print(f"  Range: [{arr.min():.4f}, {arr.max():.4f}]")
-                print(f"  Mean: {arr.mean():.4f}, Std: {arr.std():.4f}")
-                print(f"  Sample values: {arr[0, 100:105, 100]}")
-            except Exception as e:
-                print(f"  无法读取 {var}: {e}")
-                
-    except Exception as e:
-        print(f"错误: {e}")
-        import traceback
-        traceback.print_exc()
 
-def validate_alignment():
-    """验证 GFS 和 ERA5 的时间和空间对齐"""
+def validate_normalized_ranges():
+    """检查标准化后的 GFS 和 ERA5 的数据范围"""
+    norm_cache_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/gfs_norm_2020_2024.npz"
+    
     gfs_reader = GFSReader(
         start_dt="2020-01-01 00:00:00",
         end_dt="2020-01-05 00:00:00"
@@ -647,110 +537,60 @@ def validate_alignment():
         end_dt="2020-01-05 00:00:00"
     )
     
-    print("=" * 60)
-    print("空间维度检查:")
-    print(f"GFS  空间：{gfs_reader.lat_len} × {gfs_reader.lon_len}")
-    print(f"ERA5 空间：{era5_reader.lat_size} × {era5_reader.lon_size}")
-    if gfs_reader.lat_len == era5_reader.lat_size and gfs_reader.lon_len == era5_reader.lon_size:
-        print("✅ 空间对齐")
-    else:
-        print("❌ 空间不对齐!")
+    # 创建数据集（启用标准化）
+    dataset = GFSERA5PairDataset(
+        gfs_reader=gfs_reader,
+        era5_reader=era5_reader,
+        base_layers=13,
+        pad_mode="repeat",
+        normalize=True,
+        norm_cache_path=norm_cache_path,
+        temporal_pair=False
+    )
     
-    print("\n" + "=" * 60)
-    print("时间范围检查:")
-    print(f"GFS  时间范围：{gfs_reader.time_index[0]} ~ {gfs_reader.time_index[-1]}")
-    print(f"ERA5 时间范围：{era5_reader.time_index[0]} ~ {era5_reader.time_index[-1]}")
+    print("=" * 70)
+    print("标准化后的 GFS 和 ERA5 数据范围检查")
+    print("=" * 70)
     
-    print("\n" + "=" * 60)
-    print("共同时间戳检查:")
-    gfs_times = set(gfs_reader.time_index)
-    era5_times = set(era5_reader.time_index)
-    common = sorted(list(gfs_times & era5_times))
-    print(f"GFS  时间步数：{len(gfs_reader.time_index)}")
-    print(f"ERA5 时间步数：{len(era5_reader.time_index)}")
-    print(f"共同时间步数：{len(common)}")
-    if len(common) == 0:
-        print("❌ 没有共同时间戳!")
-    else:
-        print(f"✅ 有 {len(common)} 个共同时间戳")
-        print(f"   首个共同：{common[0]}")
-        print(f"   最后共同：{common[-1]}")
+    # 采样多个时间戳来统计
+    num_samples = min(5, len(dataset))
+    gfs_ranges = {var: {"min": float('inf'), "max": float('-inf')} for var in dataset.gfs_vars}
+    era5_ranges = {var: {"min": float('inf'), "max": float('-inf')} for var in dataset.gfs_vars}
     
-    print("\n" + "=" * 60)
-    print("数据内容检查(采样一个时间戳):")
-    if common:
-        ts = common[0]
-        gfs_data = gfs_reader.read_by_time(ts, ["Temperature"])
-        era5_data = era5_reader.read_by_time(ts, ["Temperature"])
+    for idx in range(num_samples):
+        gfs, era5, ts = dataset[idx]
+        # gfs, era5 形状: (L, V, H, W)，其中 V 是变量维度
+        print(f"\n时间戳 {idx + 1}/{num_samples}: {ts}")
+        print(f"  GFS  数据形状: {gfs.shape}")
+        print(f"  ERA5 数据形状: {era5.shape}")
         
-        g = gfs_data["Temperature"]
-        e = era5_data["Temperature"]
-        print(f"GFS  Temperature shape: {g.shape}")
-        print(f"ERA5 Temperature shape: {e.shape}")
-        print(f"GFS  数据范围: [{g.min():.2f}, {g.max():.2f}]")
-        print(f"ERA5 数据范围: [{e.min():.2f}, {e.max():.2f}]")
+        for v_idx, var in enumerate(dataset.gfs_vars):
+            gfs_var_data = gfs[:, v_idx, :, :].numpy()  # (L, H, W)
+            era5_var_data = era5[:, v_idx, :, :].numpy()
+            
+            gfs_min, gfs_max = gfs_var_data.min(), gfs_var_data.max()
+            era5_min, era5_max = era5_var_data.min(), era5_var_data.max()
+            
+            gfs_ranges[var]["min"] = min(gfs_ranges[var]["min"], gfs_min)
+            gfs_ranges[var]["max"] = max(gfs_ranges[var]["max"], gfs_max)
+            era5_ranges[var]["min"] = min(era5_ranges[var]["min"], era5_min)
+            era5_ranges[var]["max"] = max(era5_ranges[var]["max"], era5_max)
+            
+            print(f"    {var}:")
+            print(f"      GFS  范围: [{gfs_min:.4f}, {gfs_max:.4f}]")
+            print(f"      ERA5 范围: [{era5_min:.4f}, {era5_max:.4f}]")
+    
+    print("\n" + "=" * 70)
+    print(f"汇总统计（{num_samples}个样本）:")
+    print("=" * 70)
+    for var in dataset.gfs_vars:
+        print(f"{var}:")
+        print(f"  GFS  范围: [{gfs_ranges[var]['min']:.4f}, {gfs_ranges[var]['max']:.4f}]")
+        print(f"  ERA5 范围: [{era5_ranges[var]['min']:.4f}, {era5_ranges[var]['max']:.4f}]")
+
 
 if __name__ == "__main__":
-    check_era5_units()
-    validate_alignment()
+    validate_normalized_ranges()
 
-# if __name__ == "__main__":
-#     import time
-#     from tqdm.auto import tqdm
-    
-#     print("=" * 60)
-#     print("开始初始化 Reader...")
-#     gfs_reader = GFSReader(
-#         start_dt="2020-01-01 00:00:00",
-#         end_dt="2024-12-31 18:00:00"
-#     )
-#     era5_reader = ERA5Reader(
-#         start_dt="2020-01-01 00:00:00",
-#         end_dt="2024-12-31 18:00:00"
-#     )
-    
-#     train_vars = [
-#         "Temperature",
-#         "2 metre temperature",
-#         "10 metre U wind component",
-#         "100 metre U wind component",
-#         "10 metre V wind component",
-#         "100 metre V wind component",
-#         "U component of wind",
-#         "V component of wind",
-#         "Geopotential height",
-#         "2 metre dewpoint temperature"
-#     ]
-    
-#     print("=" * 60)
-#     print("开始初始化数据集...")
-#     dataset = GFSERA5PairDataset(
-#         gfs_reader=gfs_reader,
-#         era5_reader=era5_reader,
-#         gfs_vars=train_vars,
-#         normalize=True,
-#         norm_cache_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c10/era5_norm_1_8.npz",
-#         base_layers=13,
-#         pad_mode="repeat",
-#     )
-    
-#     print(f"✅ 数据集初始化完成，共 {len(dataset)} 个样本")
-
-    
-#     batch_size = 2
-#     dataloader = DataLoader(
-#         dataset,
-#         batch_size=batch_size,
-#         shuffle=False,
-#         num_workers=0,
-#         collate_fn=lambda x: collate_fn(x, base_layers=13)
-#     )
-#     print("dataloader加载完毕")
-
-#     for batch_idx, (gfs_batch, era5_batch, ts_batch) in enumerate(dataloader):
-#         print("gfs_batch shape:", tuple(gfs_batch.shape))   # (B*13, V, 2, 721, 1440)
-#         print("era5_batch shape:", tuple(era5_batch.shape)) # (B*13, V, 2, 721, 1440)
-#         print("ts pairs sample:", ts_batch[:2])
-#         break
     
     
