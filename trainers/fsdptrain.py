@@ -144,6 +144,7 @@ class FSDPTrainer(BaseTrainer):
 
     def train(self):
         try:
+            print("training..")
             for epoch in range(self.epochs):
                 self.train_one_epoch(epoch)
                 

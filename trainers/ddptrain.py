@@ -13,20 +13,37 @@ class DDPTrainer(BaseTrainer):
         self,
         log_dir: str = "./logs",
         use_ddp: bool = True,
-        num_gpus: int = None,
         save_dir: str = "./checkpoints",
         save_interval: int = 10,
         **kwargs
     ):
         super().__init__(**kwargs, save_dir=save_dir, save_interval=save_interval)
         
-        self.rank = int(os.environ.get("RANK", 0))
-        self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-        self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        # 检查是否通过 torchrun 启动（环境变量存在）
+        self.is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
         
-        # 如果没有分布式环境但指定了 num_gpus，则初始化
-        if self.world_size == 1 and num_gpus is not None and num_gpus > 1:
-            self._init_distributed(num_gpus)
+        if self.is_distributed:
+            # torchrun 启动：从环境变量读取
+            self.rank = int(os.environ["RANK"])
+            self.world_size = int(os.environ["WORLD_SIZE"])
+            self.local_rank = int(os.environ["LOCAL_RANK"])
+            
+            # 初始化进程组
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl")
+                if self.rank == 0:
+                    print(f"✅ DDP 进程组已初始化：{self.world_size} 张 GPU")
+            
+            torch.cuda.set_device(self.local_rank)
+            self.use_ddp = use_ddp
+        else:
+            # 单卡启动：不使用 DDP
+            self.rank = 0
+            self.world_size = 1
+            self.local_rank = 0
+            self.use_ddp = False
+            if self.rank == 0:
+                print(f"ℹ️  单卡训练模式（未检测到 torchrun）")
         
         # TensorBoard 配置（只在主进程）
         self.log_dir = Path(log_dir)
@@ -38,35 +55,13 @@ class DDPTrainer(BaseTrainer):
             self.writer = None
         
         self.global_step = 0
-        self.use_ddp = use_ddp and torch.cuda.is_available() and self.world_size > 1
         
         # 如果启用 DDP，包装模型
-        if self.use_ddp:
+        if self.use_ddp and self.is_distributed:
             self._setup_ddp()
-        elif self.rank == 0:
-            print(f"ℹ️  使用单卡训练（world_size={self.world_size}）")
-    
-    def _init_distributed(self, num_gpus: int):
-        """初始化分布式训练环境"""
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12355"
-        os.environ["RANK"] = "0"
-        os.environ["LOCAL_RANK"] = "0"
-        os.environ["WORLD_SIZE"] = str(num_gpus)
-        
-        dist.init_process_group(backend="nccl", init_method="env://")
-        
-        self.rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
-        self.local_rank = self.rank
-        
-        torch.cuda.set_device(self.local_rank)
-        
-        if self.rank == 0:
-            print(f"✅ 分布式训练已初始化：{self.world_size} 张 GPU")
     
     def _setup_ddp(self):
-        """初始化 DDP"""
+        """初始化 DDP 模型包装"""
         torch.cuda.set_device(self.local_rank)
         self.model = self.model.to(self.local_rank)
         
@@ -78,7 +73,7 @@ class DDPTrainer(BaseTrainer):
         )
         
         if self.rank == 0:
-            print(f"✅ DDP 已启用，使用 {self.world_size} 张 GPU")
+            print(f"✅ DDP 模型已包装，使用 {self.world_size} 张 GPU")
     
     def train_one_epoch(self, epoch):
         self.model.train()
@@ -173,13 +168,7 @@ class DDPTrainer(BaseTrainer):
                 self.writer.close()
                 print(f"\n✅ TensorBoard 日志已保存到: {self.log_dir}")
             
-            if self.use_ddp:
-                self._destroy_ddp()
-    
-    def _destroy_ddp(self):
-        """清理 DDP 资源"""
-        if self.world_size > 1:
-            dist.destroy_process_group()
-        
-        if self.rank == 0:
-            print("✅ DDP 已清理")
+            if self.is_distributed and dist.is_initialized():
+                dist.destroy_process_group()
+                if self.rank == 0:
+                    print("✅ DDP 进程组已清理")

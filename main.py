@@ -110,7 +110,6 @@ def main():
         T_max=30, 
         eta_min=1e-6
     )
-
     trainer = DDPTrainer(
         model=model,
         train_loader=train_loader,
@@ -126,11 +125,12 @@ def main():
         save_dir="./checkpoints",
         save_interval=1,
     )
+    print("DDPTrainer init")
     trainer.train()
 
 
 
 if __name__ == "__main__":
     main()
-
+#export LD_PRELOAD=/home/ximutian/miniconda3/envs/xuyue/lib/libstdc++.so.6
 
