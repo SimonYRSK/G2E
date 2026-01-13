@@ -13,6 +13,7 @@ class DDPTrainer(BaseTrainer):
         self,
         log_dir: str = "./logs",
         use_ddp: bool = True,
+        num_gpus: int = None,
         save_dir: str = "./checkpoints",
         save_interval: int = 10,
         **kwargs

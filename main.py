@@ -96,7 +96,7 @@ def main():
     )
     print("dataloader加载完毕")
 
-    model = G2EVAE(embed_dim=384, num_heads=6, window_size=7, depth = 4, latent_dim=384).to(device)
+    model = G2EVAE(embed_dim=768, num_heads=6, window_size=7, depth = 8, latent_dim=768).to(device)
 
 
     optimizer = torch.optim.Adam(
@@ -132,5 +132,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-#export LD_PRELOAD=/home/ximutian/miniconda3/envs/xuyue/lib/libstdc++.so.6
+# export LD_PRELOAD=/home/ximutian/miniconda3/envs/xuyue/lib/libstdc++.so.6
+# torchrun --nproc_per_node=2 main.py
 
