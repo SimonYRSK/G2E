@@ -5,6 +5,7 @@ from torch.utils.data import Dataset, DataLoader
 import random
 from trainers.basetrain import BaseTrainer
 from trainers.amptrain import AMPTrainer
+from trainers.ddptrain import DDPTrainer
 from trainers.fsdptrain import FSDPTrainer
 from models.vaebase import G2EVAE
 from data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
@@ -110,21 +111,23 @@ def main():
         eta_min=1e-6
     )
 
-    trainer = FSDPTrainer(
+    trainer = DDPTrainer(
         model=model,
         train_loader=train_loader,
         test_loader=test_loader,
         optimizer=optimizer,
         scheduler=scheduler,
-        epochs=50,
+        epochs=4,
         device=device,
         beta=0.1,
-        log_dir="./runs/experiment_1",
-        use_fsdp=False,  # 单卡不使用 FSDP
+        log_dir="./runs/experiment_ddp",
+        use_ddp=True,  # 单卡设为 False
+        num_gpus = 2,
+        save_dir="./checkpoints",
+        save_interval=1,
     )
     trainer.train()
 
-    trainer.train()
 
 
 if __name__ == "__main__":
