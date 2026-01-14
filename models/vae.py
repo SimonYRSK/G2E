@@ -318,10 +318,20 @@ class G2E(nn.Module):
         return x, (h, w)
 
     def reparameterize(self, mu, logvar):
-        logvar = torch.clamp(logvar, min=-10.0, max=10.0)
-        std = torch.exp(0.5 * logvar) + 1e-6
+        # ✅ 更严格的 clamp（防止 NaN）
+        logvar = torch.clamp(logvar, min=-5.0, max=5.0)  # 从 -10/10 改为 -5/5
+        
+        # ✅ 稳定的 std 计算
+        std = torch.exp(0.5 * logvar)
+        std = torch.clamp(std, min=1e-4, max=10.0)  # 限制 std 范围
+        
         eps = torch.randn_like(std)
-        return mu + eps * std
+        z = mu + eps * std
+        
+        # ✅ 最终检查
+        z = torch.nan_to_num(z, nan=0.0, posinf=10.0, neginf=-10.0)
+    
+        return z
 
     def forward(self, x):
         if x.dim() == 5:
