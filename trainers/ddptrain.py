@@ -11,24 +11,41 @@ import torch.distributed as dist
 class DDPTrainer(BaseTrainer):
     def __init__(
         self,
+        model,
+        train_loader,
+        test_loader,
+        optimizer,
+        scheduler,
+        epochs,
+        device,
+        beta,
         log_dir: str = "./logs",
         use_ddp: bool = True,
         save_dir: str = "./checkpoints",
         save_interval: int = 10,
-        **kwargs
     ):
-        super().__init__(**kwargs, save_dir=save_dir, save_interval=save_interval)
+        # ✅ 显式传递所有参数给父类
+        super().__init__(
+            model=model,
+            train_loader=train_loader,
+            test_loader=test_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epochs=epochs,
+            device=device,
+            beta=beta,
+            save_dir=save_dir,
+            save_interval=save_interval,
+        )
         
-        # 检查是否通过 torchrun 启动（环境变量存在）
+        # 检查是否通过 torchrun 启动
         self.is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
         
         if self.is_distributed:
-            # torchrun 启动：从环境变量读取
             self.rank = int(os.environ["RANK"])
             self.world_size = int(os.environ["WORLD_SIZE"])
             self.local_rank = int(os.environ["LOCAL_RANK"])
             
-            # 初始化进程组
             if not dist.is_initialized():
                 dist.init_process_group(backend="nccl")
                 if self.rank == 0:
@@ -37,15 +54,14 @@ class DDPTrainer(BaseTrainer):
             torch.cuda.set_device(self.local_rank)
             self.use_ddp = use_ddp
         else:
-            # 单卡启动：不使用 DDP
             self.rank = 0
             self.world_size = 1
             self.local_rank = 0
             self.use_ddp = False
             if self.rank == 0:
-                print(f"ℹ️  单卡训练模式（未检测到 torchrun）")
+                print(f"ℹ️  单卡训练模式")
         
-        # TensorBoard 配置（只在主进程）
+        # TensorBoard（仅主进程）
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
@@ -56,7 +72,7 @@ class DDPTrainer(BaseTrainer):
         
         self.global_step = 0
         
-        # 如果启用 DDP，包装模型
+        # 包装 DDP
         if self.use_ddp and self.is_distributed:
             self._setup_ddp()
     
@@ -76,6 +92,7 @@ class DDPTrainer(BaseTrainer):
             print(f"✅ DDP 模型已包装，使用 {self.world_size} 张 GPU")
     
     def train_one_epoch(self, epoch):
+        """单轮训练（仅主进程显示进度）"""
         self.model.train()
         total_loss = 0.0
         total_recon_loss = 0.0
@@ -84,7 +101,7 @@ class DDPTrainer(BaseTrainer):
         pbar = tqdm(
             self.trainlo,
             desc=f"Epoch {epoch+1}/{self.epochs}",
-            disable=self.rank != 0,
+            disable=self.rank != 0,  # ✅ 仅主进程显示
         )
 
         for batch_idx, (x, y, t) in enumerate(pbar):
@@ -95,9 +112,10 @@ class DDPTrainer(BaseTrainer):
             kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var)
             loss = kl_loss * self.beta + recon_loss
 
-            loss_item = float(loss.detach())
-            recon_item = float(recon_loss.detach())
-            kl_item = float(kl_loss.detach())
+            # ✅ 一致使用 .item()
+            loss_item = loss.item()
+            recon_item = recon_loss.item()
+            kl_item = kl_loss.item()
 
             total_loss += loss_item
             total_recon_loss += recon_item
@@ -105,6 +123,7 @@ class DDPTrainer(BaseTrainer):
 
             self.opt.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.opt.step()
 
             if self.writer is not None:
@@ -136,37 +155,27 @@ class DDPTrainer(BaseTrainer):
                 self.writer.add_scalar('KLLoss/epoch', avg_kl, epoch)
                 self.writer.add_scalar('LearningRate', self.sch.get_last_lr()[0], epoch)
 
-    def save_checkpoint(self, epoch):
-        """保存模型 checkpoint（只在主进程）"""
-        if self.rank != 0:
-            return
+    def train(self, resume_path=None):
+        """训练循环，支持断点续传"""
+        start_epoch = 0
+        best_metric = None
         
-        # 如果是 DDP 模型，保存 module 的 state_dict
-        model_state = self.model.module.state_dict() if self.use_ddp else self.model.state_dict()
+        # ✅ 调用父类的 load_checkpoint，返回值正确
+        if resume_path is not None:
+            start_epoch, best_metric = self.load_checkpoint(resume_path, strict=True)
         
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model_state,
-            'optimizer_state_dict': self.opt.state_dict(),
-            'scheduler_state_dict': self.sch.state_dict(),
-        }
-        
-        save_path = self.save_dir / f"checkpoint_epoch_{epoch+1}.pt"
-        torch.save(checkpoint, save_path)
-        print(f"✅ Checkpoint 已保存: {save_path}")
-
-    def train(self):
         try:
-            for epoch in range(self.epochs):
+            for epoch in range(start_epoch, self.epochs):
                 self.train_one_epoch(epoch)
                 
-                # 只在主进程保存 checkpoint
-                if self.rank == 0 and (epoch + 1) % self.save_interval == 0:
-                    self.save_checkpoint(epoch)
+                # ✅ 仅主进程保存（父类 save_checkpoint 已处理）
+                if (epoch + 1) % self.save_interval == 0:
+                    self.save_checkpoint(epoch, tag="last", best_metric=best_metric)
         finally:
             if self.writer is not None:
                 self.writer.close()
-                print(f"\n✅ TensorBoard 日志已保存到: {self.log_dir}")
+                if self.rank == 0:
+                    print(f"\n✅ TensorBoard 日志已保存到: {self.log_dir}")
             
             if self.is_distributed and dist.is_initialized():
                 dist.destroy_process_group()
