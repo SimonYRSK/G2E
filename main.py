@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, DistributedSampler  # ✅ 导入
 import random
 from trainers.basetrain import BaseTrainer
 from trainers.amptrain import AMPTrainer
@@ -9,7 +9,7 @@ from trainers.ddptrain import DDPTrainer
 from trainers.fsdptrain import FSDPTrainer
 from models.vae import G2E
 from data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
-
+import os  # ✅ 导入
 
 def set_random_seed(seed, rank):
     random.seed(seed + rank)
@@ -22,6 +22,18 @@ def set_random_seed(seed, rank):
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"using device: {device}")
+
+    # ✅ 检查是否在 DDP 模式
+    is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+    if is_distributed:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+    else:
+        rank = 0
+        world_size = 1
+
+    # ✅ 设置随机种子
+    set_random_seed(42, rank)
 
     gfs_reader_train = GFSReader(
         start_dt="2020-01-01 00:00:00",
@@ -54,8 +66,6 @@ def main():
         "2 metre dewpoint temperature"
     ]
 
-
-
     train_dataset = GFSERA5PairDataset(
         gfs_reader=gfs_reader_train,
         era5_reader=era5_reader_train,
@@ -79,36 +89,60 @@ def main():
     print(f"✅ 数据集初始化完成")
 
     batch_size = 1
+    
+    # ✅ 为训练集添加 DistributedSampler
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,  # ✅ 每轮随机打乱
+        seed=42
+    )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        sampler=train_sampler,  # ✅ 用 sampler 替代 shuffle
         num_workers=2,
         collate_fn=lambda x: collate_fn(x, base_layers=13)
+    )
+
+    # ✅ 为测试集添加 DistributedSampler（可选，但推荐）
+    test_sampler = DistributedSampler(
+        test_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,  # 测试集不需要随机
+        seed=42
     )
 
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        sampler=test_sampler,  # ✅ 用 sampler
         num_workers=2,
         collate_fn=lambda x: collate_fn(x, base_layers=13)
     )
-    print("dataloader加载完毕")
+    
+    if rank == 0:
+        print(f"✅ DataLoader 加载完毕")
+        print(f"   训练集样本总数: {len(train_dataset)}")
+        print(f"   每张 GPU 分配: {len(train_dataset) // world_size}")
 
-#=========================================================================================================================================================
-#=========================================================================================================================================================
+    #=========================================================================================================================================================
+    #=========================================================================================================================================================
+    
     model = G2E(
         in_ch=10, out_ch=10,
-        widths=(64, 128, 256),
+        widths=(32, 64, 128),
         encoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "down": "conv"},
-            "stage1": {"blocks": ["resblock", "resblock"], "down": "conv"},
-            "stage2": {"blocks": ["resblock", "resblock"], "down": "conv"},
+            "stage0": {"blocks": ["resblock"], "down": "conv"},
+            "stage1": {"blocks": ["resblock"], "down": "conv"},
+            "stage2": {"blocks": ["resblock"], "down": "conv"},
         },
         decoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "up": "upsample"},
-            "stage1": {"blocks": ["resblock", "resblock"], "up": "upsample"},
+            "stage0": {"blocks": ["resblock"], "up": "upsample"},
+            "stage1": {"blocks": ["resblock"], "up": "upsample"},
         },
     ).to(device)
 
@@ -123,6 +157,7 @@ def main():
         T_max=30, 
         eta_min=1e-6
     )
+    
     trainer = DDPTrainer(
         model=model,
         train_loader=train_loader,
@@ -131,20 +166,20 @@ def main():
         scheduler=scheduler,
         epochs=4,
         device=device,
-        beta=0.1,
+        beta=1e-5,
         log_dir="./runs/experiment_ddp",
-        use_ddp=True,  # 单卡设为 False
-        num_gpus = 2,
+        use_ddp=False,  # 单卡设为 False
         save_dir="./checkpoints",
         save_interval=1,
     )
-    print("DDPTrainer init")
+    
+    if rank == 0:
+        print("✅ DDPTrainer 初始化完成")
+    
     trainer.train()
-
 
 
 if __name__ == "__main__":
     main()
 # export LD_PRELOAD=/home/ximutian/miniconda3/envs/xuyue/lib/libstdc++.so.6
 # torchrun --nproc_per_node=2 main.py
-
