@@ -26,17 +26,52 @@ class FSDPTrainer(BaseTrainer):
         use_fsdp: bool = True,
         save_dir: str = "./checkpoints",
         save_interval: int = 10,
-        sharding_strategy: str = "FULL_SHARD",  # ✅ 可选：FULL_SHARD, SHARD_GRAD_OP, NO_SHARD
-        mixed_precision: bool = False,  # ✅ 是否使用混合精度
-        min_num_params: int = 1e6,  # ✅ 自动分片的最小参数量
+        sharding_strategy: str = "FULL_SHARD",
+        mixed_precision: bool = False,
+        min_num_params: int = 1e6,
+        # ✅ 新增：优化器和调度器的配置参数
+        optimizer_config: dict = None,
+        scheduler_config: dict = None,
     ):
-        # ✅ 显式传递所有参数给父类
+        # ✅ 暂存优化器/调度器配置（在 FSDP 包装前）
+        if optimizer is not None:
+            self.optimizer_config = {
+                'type': type(optimizer).__name__,
+                'lr': optimizer.defaults.get('lr', 1e-4),
+                'weight_decay': optimizer.defaults.get('weight_decay', 1e-5),
+                'betas': optimizer.defaults.get('betas', (0.9, 0.999)),
+            }
+        else:
+            self.optimizer_config = optimizer_config or {
+                'type': 'Adam',
+                'lr': 1e-4,
+                'weight_decay': 1e-5,
+                'betas': (0.9, 0.999),
+            }
+        
+        if scheduler is not None:
+            if hasattr(scheduler, 'T_max'):
+                self.scheduler_config = {
+                    'type': 'CosineAnnealingLR',
+                    'T_max': scheduler.T_max,
+                    'eta_min': getattr(scheduler, 'eta_min', 1e-6),
+                }
+            else:
+                self.scheduler_config = {'type': None}
+        else:
+            self.scheduler_config = scheduler_config or {
+                'type': 'CosineAnnealingLR',
+                'T_max': 30,
+                'eta_min': 1e-6,
+            }
+        
+        # ✅ 先传递 None 给父类（稍后重新创建）
         super().__init__(
             model=model,
             train_loader=train_loader,
             test_loader=test_loader,
-            optimizer=optimizer,
-            scheduler=scheduler,
+            optimizer=None,  # ✅ 暂时传 None
+            scheduler=None,  # ✅ 暂时传 None
             epochs=epochs,
             device=device,
             beta=beta,
@@ -58,7 +93,6 @@ class FSDPTrainer(BaseTrainer):
                     print(f"✅ FSDP 进程组已初始化：{self.world_size} 张 GPU")
             
             torch.cuda.set_device(self.local_rank)
-            # ✅ 重新设置 device 为 local_rank
             self.device = torch.device(f"cuda:{self.local_rank}")
             self.use_fsdp = use_fsdp
         else:
@@ -88,27 +122,33 @@ class FSDPTrainer(BaseTrainer):
         # 包装 FSDP
         if self.use_fsdp and self.is_distributed:
             self._setup_fsdp()
+        
+        # ✅ FSDP 包装后创建优化器和调度器
+        self._setup_optimizer_scheduler()
     
     def _setup_fsdp(self):
         """初始化 FSDP 模型包装"""
         torch.cuda.set_device(self.local_rank)
-        self.model = self.model.to(self.local_rank)
+        # ✅ 只移动到对应的 GPU，不调用 .to(device)
+        # FSDP 会自动处理设备分配
+        if not next(self.model.parameters()).is_cuda:
+            self.model = self.model.to(self.local_rank)
         
-        # ✅ 设置分片策略
+        # 设置分片策略
         sharding_strategy_map = {
-            "FULL_SHARD": ShardingStrategy.FULL_SHARD,  # 完全分片（最省显存）
-            "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,  # 仅分片梯度
-            "NO_SHARD": ShardingStrategy.NO_SHARD,  # 不分片（等同 DDP）
+            "FULL_SHARD": ShardingStrategy.FULL_SHARD,
+            "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,
+            "NO_SHARD": ShardingStrategy.NO_SHARD,
         }
         strategy = sharding_strategy_map.get(self.sharding_strategy, ShardingStrategy.FULL_SHARD)
         
-        # ✅ 自动分片策略（基于参数量）
+        # 自动分片策略
         auto_wrap_policy = partial(
             size_based_auto_wrap_policy,
             min_num_params=self.min_num_params
         )
         
-        # ✅ 混合精度配置
+        # 混合精度配置
         mixed_precision_policy = None
         if self.mixed_precision:
             mixed_precision_policy = MixedPrecision(
@@ -117,7 +157,7 @@ class FSDPTrainer(BaseTrainer):
                 buffer_dtype=torch.float16,
             )
         
-        # ✅ 包装 FSDP
+        # 包装 FSDP
         self.model = FSDP(
             self.model,
             auto_wrap_policy=auto_wrap_policy,
@@ -131,6 +171,62 @@ class FSDPTrainer(BaseTrainer):
             print(f"   分片策略: {self.sharding_strategy}")
             print(f"   混合精度: {self.mixed_precision}")
             print(f"   使用 GPU 数: {self.world_size}")
+            
+            # ✅ 打印参数量（验证分片）
+            total_params = sum(p.numel() for p in self.model.parameters())
+            print(f"   本 GPU 参数量: {total_params / 1e6:.2f}M")
+    
+    def _setup_optimizer_scheduler(self):
+        """✅ 在 FSDP 包装后创建优化器和调度器"""
+        # 创建优化器
+        opt_cfg = self.optimizer_config
+        if opt_cfg['type'] == 'Adam':
+            self.opt = torch.optim.Adam(
+                self.model.parameters(),
+                lr=opt_cfg['lr'],
+                weight_decay=opt_cfg['weight_decay'],
+                betas=opt_cfg['betas']
+            )
+        elif opt_cfg['type'] == 'AdamW':
+            self.opt = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=opt_cfg['lr'],
+                weight_decay=opt_cfg['weight_decay'],
+                betas=opt_cfg['betas']
+            )
+        elif opt_cfg['type'] == 'SGD':
+            self.opt = torch.optim.SGD(
+                self.model.parameters(),
+                lr=opt_cfg['lr'],
+                weight_decay=opt_cfg['weight_decay'],
+                momentum=opt_cfg.get('momentum', 0.9)
+            )
+        else:
+            raise ValueError(f"不支持的优化器类型: {opt_cfg['type']}")
+        
+        # 创建调度器
+        sch_cfg = self.scheduler_config
+        if sch_cfg.get('type') == 'CosineAnnealingLR':
+            self.sch = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.opt,
+                T_max=sch_cfg['T_max'],
+                eta_min=sch_cfg['eta_min']
+            )
+        elif sch_cfg.get('type') == 'StepLR':
+            self.sch = torch.optim.lr_scheduler.StepLR(
+                self.opt,
+                step_size=sch_cfg.get('step_size', 10),
+                gamma=sch_cfg.get('gamma', 0.1)
+            )
+        elif sch_cfg.get('type') is None:
+            self.sch = None
+        else:
+            raise ValueError(f"不支持的调度器类型: {sch_cfg['type']}")
+        
+        if self.rank == 0:
+            print(f"✅ 优化器已创建: {opt_cfg['type']} (lr={opt_cfg['lr']})")
+            if self.sch is not None:
+                print(f"✅ 调度器已创建: {sch_cfg['type']}")
     
     def _set_sampler_epoch(self, epoch):
         """设置 DistributedSampler 的 epoch，保证随机性"""
@@ -141,7 +237,6 @@ class FSDPTrainer(BaseTrainer):
     
     def train_one_epoch(self, epoch):
         """单轮训练（FSDP 版本）"""
-        # ✅ 设置 sampler epoch
         self._set_sampler_epoch(epoch)
         
         self.model.train()
@@ -189,7 +284,8 @@ class FSDPTrainer(BaseTrainer):
                 'KL': f'{kl_item:.4f}',
             })
 
-        self.sch.step()
+        if self.sch is not None:
+            self.sch.step()
 
         avg_loss = total_loss / len(self.trainlo)
         avg_recon = total_recon_loss / len(self.trainlo)
@@ -203,7 +299,8 @@ class FSDPTrainer(BaseTrainer):
                 self.writer.add_scalar('Loss/epoch', avg_loss, epoch)
                 self.writer.add_scalar('ReconLoss/epoch', avg_recon, epoch)
                 self.writer.add_scalar('KLLoss/epoch', avg_kl, epoch)
-                self.writer.add_scalar('LearningRate', self.sch.get_last_lr()[0], epoch)
+                if self.sch is not None:
+                    self.writer.add_scalar('LearningRate', self.sch.get_last_lr()[0], epoch)
         
         return avg_loss, avg_recon, avg_kl
 
@@ -259,18 +356,13 @@ class FSDPTrainer(BaseTrainer):
         start_epoch = 0
         best_metric = None
         
-        # ✅ 从 checkpoint 恢复
         if resume_path is not None:
             start_epoch, best_metric = self.load_checkpoint(resume_path, strict=True)
         
         try:
             for epoch in range(start_epoch, self.epochs):
-                # 训练
                 self.train_one_epoch(epoch)
                 
-                
-                
-                # 保存 checkpoint
                 if (epoch + 1) % self.save_interval == 0:
                     self.save_checkpoint(epoch, tag="last", best_metric=best_metric)
         
@@ -290,7 +382,6 @@ class FSDPTrainer(BaseTrainer):
         if self.rank != 0:
             return None
         
-        # ✅ FSDP 需要先聚合所有分片
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
         
         save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
@@ -320,7 +411,6 @@ class FSDPTrainer(BaseTrainer):
         
         ckpt = torch.load(path, map_location="cpu")
         
-        # ✅ FSDP 需要特殊的加载方式
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
         
         load_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
@@ -333,11 +423,9 @@ class FSDPTrainer(BaseTrainer):
             else:
                 self.model.load_state_dict(ckpt, strict=strict)
         
-        # 加载优化器状态
         if load_optim and ckpt.get('optimizer_state_dict') and self.opt is not None:
             self.opt.load_state_dict(ckpt['optimizer_state_dict'])
         
-        # 加载调度器状态
         if load_sched and ckpt.get('scheduler_state_dict') and self.sch is not None:
             self.sch.load_state_dict(ckpt['scheduler_state_dict'])
         
@@ -346,9 +434,6 @@ class FSDPTrainer(BaseTrainer):
         
         if self.rank == 0:
             print(f"✅ 已加载 FSDP checkpoint: {path}")
-            print(f"   严格模式: {strict}")
-            print(f"   恢复优化器: {load_optim}")
-            print(f"   恢复调度器: {load_sched}")
             print(f"   下一轮从 epoch {start_epoch} 开始")
             if best_metric is not None:
                 print(f"   最佳指标: {best_metric}")

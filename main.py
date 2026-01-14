@@ -37,20 +37,20 @@ def main():
 
     gfs_reader_train = GFSReader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2024-12-31 18:00:00"
+        end_dt="2020-01-02 18:00:00" #"2024-12-31 18:00:00"
     )
     era5_reader_train = ERA5Reader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2024-12-31 18:00:00"
+        end_dt="2020-01-02 18:00:00"
     )
 
     gfs_reader_test = GFSReader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2024-12-31 18:00:00"
+        end_dt="2020-01-02 18:00:00"
     )
     era5_reader_test = ERA5Reader(
         start_dt="2020-01-01 00:00:00",
-        end_dt="2024-12-31 18:00:00"
+        end_dt="2020-01-02 18:00:00"
     )
 
     train_vars = [
@@ -146,24 +146,27 @@ def main():
         },
     )
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), 
-        lr=1e-4,
-        weight_decay=1e-5, 
-        betas=(0.9, 0.999)
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, 
-        T_max=30, 
-        eta_min=1e-6
-    )
-    
+        
+    # ✅ 优化器和调度器的配置（传给 FSDPTrainer）
+    optimizer_config = {
+        'type': 'Adam',
+        'lr': 1e-4,
+        'weight_decay': 1e-5,
+        'betas': (0.9, 0.999),
+    }
+
+    scheduler_config = {
+        'type': 'CosineAnnealingLR',
+        'T_max': 30,
+        'eta_min': 1e-6,
+    }
+
     trainer = FSDPTrainer(
         model=model,
         train_loader=train_loader,
         test_loader=test_loader,
-        optimizer=optimizer,
-        scheduler=scheduler,
+        optimizer=None,  # ✅ 传 None，由 Trainer 内部创建
+        scheduler=None,  # ✅ 传 None
         epochs=3,
         device=device,
         beta=1e-5,
@@ -171,10 +174,14 @@ def main():
         use_fsdp=True,
         save_dir="./checkpoints",
         save_interval=1,
-        sharding_strategy="FULL_SHARD",  # ✅ 完全分片（最省显存）
-        mixed_precision=False,  # ✅ 可选：启用混合精度进一步减少显存
-        min_num_params=1e6,  # ✅ 超过 100 万参数的模块会被分片
+        sharding_strategy="FULL_SHARD",
+        mixed_precision=False,
+        min_num_params=1e6,
+        optimizer_config=optimizer_config,  # ✅ 传配置
+        scheduler_config=scheduler_config,  # ✅ 传配置
     )
+
+# ...existing code...
     
     if rank == 0:
         print("✅ DDPTrainer 初始化完成")
