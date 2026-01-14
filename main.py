@@ -144,7 +144,7 @@ def main():
             "stage0": {"blocks": ["resblock"], "up": "upsample"},
             "stage1": {"blocks": ["resblock"], "up": "upsample"},
         },
-    ).to(device)
+    )
 
     optimizer = torch.optim.Adam(
         model.parameters(), 
@@ -158,19 +158,22 @@ def main():
         eta_min=1e-6
     )
     
-    trainer = DDPTrainer(
+    trainer = FSDPTrainer(
         model=model,
         train_loader=train_loader,
         test_loader=test_loader,
         optimizer=optimizer,
         scheduler=scheduler,
-        epochs=4,
+        epochs=3,
         device=device,
         beta=1e-5,
-        log_dir="./runs/experiment_ddp",
-        use_ddp=False,  # 单卡设为 False
+        log_dir="./runs/experiment_fsdp",
+        use_fsdp=True,
         save_dir="./checkpoints",
         save_interval=1,
+        sharding_strategy="FULL_SHARD",  # ✅ 完全分片（最省显存）
+        mixed_precision=False,  # ✅ 可选：启用混合精度进一步减少显存
+        min_num_params=1e6,  # ✅ 超过 100 万参数的模块会被分片
     )
     
     if rank == 0:
