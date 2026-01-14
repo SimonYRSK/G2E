@@ -7,8 +7,7 @@ from trainers.basetrain import BaseTrainer
 from trainers.amptrain import AMPTrainer
 from trainers.ddptrain import DDPTrainer
 from trainers.fsdptrain import FSDPTrainer
-from models.vaebase import G2EVAE
-from models.vaeunet import VAEUNet
+from models.vae import G2E
 from data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
 
 
@@ -97,13 +96,20 @@ def main():
     )
     print("dataloader加载完毕")
 
-    model = VAEUNet(
-        in_ch=10,
-        out_ch=10,
+#=========================================================================================================================================================
+#=========================================================================================================================================================
+    model = G2E(
+        in_ch=10, out_ch=10,
         widths=(64, 128, 256),
-        res_blocks_per_stage=(4, 4, 4),
-        use_attn=True,
-        attn_cfg={"stages": [False, True, True], "nhead": 8, "stride": 4, "ff_mult": 4, "depth": 2},
+        encoder_cfg={
+            "stage0": {"blocks": ["resblock", "resblock"], "down": "conv"},
+            "stage1": {"blocks": ["resblock", "resblock"], "down": "conv"},
+            "stage2": {"blocks": ["resblock", "resblock"], "down": "conv"},
+        },
+        decoder_cfg={
+            "stage0": {"blocks": ["resblock", "resblock"], "up": "upsample"},
+            "stage1": {"blocks": ["resblock", "resblock"], "up": "upsample"},
+        },
     ).to(device)
 
     optimizer = torch.optim.Adam(
