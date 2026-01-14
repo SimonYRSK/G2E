@@ -300,8 +300,11 @@ class G2E(nn.Module):
         bott_ch = widths[-1]
         self.mu = nn.Conv2d(bott_ch, self.latent_dim, 1)
         self.logvar = nn.Conv2d(bott_ch, self.latent_dim, 1)
-        nn.init.constant_(self.logvar.weight, -5.0)
-        nn.init.constant_(self.logvar.bias, -5.0)
+        nn.init.normal_(self.logvar.weight, mean=0.0, std=0.01)  # ✅ 小随机权重
+        nn.init.constant_(self.logvar.bias, 0.0)                  # ✅ 偏置为 0（log(1) = 0）
+        
+        nn.init.normal_(self.mu.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.mu.bias)
         
         self.lat2feat = nn.Conv2d(self.latent_dim, bott_ch, 1)
         self.decoder = FlexibleDecoder(out_ch, widths, decoder_cfg, norm, act, **block_kwargs)
@@ -315,7 +318,7 @@ class G2E(nn.Module):
         return x, (h, w)
 
     def reparameterize(self, mu, logvar):
-        logvar = torch.clamp(logvar, -10.0, 10.0)
+        logvar = torch.clamp(logvar, min=-10.0, max=10.0)
         std = torch.exp(0.5 * logvar) + 1e-6
         eps = torch.randn_like(std)
         return mu + eps * std

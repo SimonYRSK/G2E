@@ -29,57 +29,10 @@ class FSDPTrainer(BaseTrainer):
         sharding_strategy: str = "FULL_SHARD",
         mixed_precision: bool = False,
         min_num_params: int = 1e6,
-        # ✅ 新增：优化器和调度器的配置参数
-        optimizer_config: dict = None,
-        scheduler_config: dict = None,
+        optimizer_config: dict = None,  # ✅ 新增
+        scheduler_config: dict = None,  # ✅ 新增
     ):
-        # ✅ 暂存优化器/调度器配置（在 FSDP 包装前）
-        if optimizer is not None:
-            self.optimizer_config = {
-                'type': type(optimizer).__name__,
-                'lr': optimizer.defaults.get('lr', 1e-4),
-                'weight_decay': optimizer.defaults.get('weight_decay', 1e-5),
-                'betas': optimizer.defaults.get('betas', (0.9, 0.999)),
-            }
-        else:
-            self.optimizer_config = optimizer_config or {
-                'type': 'Adam',
-                'lr': 1e-4,
-                'weight_decay': 1e-5,
-                'betas': (0.9, 0.999),
-            }
-        
-        if scheduler is not None:
-            if hasattr(scheduler, 'T_max'):
-                self.scheduler_config = {
-                    'type': 'CosineAnnealingLR',
-                    'T_max': scheduler.T_max,
-                    'eta_min': getattr(scheduler, 'eta_min', 1e-6),
-                }
-            else:
-                self.scheduler_config = {'type': None}
-        else:
-            self.scheduler_config = scheduler_config or {
-                'type': 'CosineAnnealingLR',
-                'T_max': 30,
-                'eta_min': 1e-6,
-            }
-        
-        # ✅ 先传递 None 给父类（稍后重新创建）
-        super().__init__(
-            model=model,
-            train_loader=train_loader,
-            test_loader=test_loader,
-            optimizer=None,  # ✅ 暂时传 None
-            scheduler=None,  # ✅ 暂时传 None
-            epochs=epochs,
-            device=device,
-            beta=beta,
-            save_dir=save_dir,
-            save_interval=save_interval,
-        )
-        
-        # 检查是否通过 torchrun 启动
+        # ✅ 步骤 1: 初始化分布式环境
         self.is_distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
         
         if self.is_distributed:
@@ -89,21 +42,45 @@ class FSDPTrainer(BaseTrainer):
             
             if not dist.is_initialized():
                 dist.init_process_group(backend="nccl")
-                if self.rank == 0:
-                    print(f"✅ FSDP 进程组已初始化：{self.world_size} 张 GPU")
             
             torch.cuda.set_device(self.local_rank)
-            self.device = torch.device(f"cuda:{self.local_rank}")
-            self.use_fsdp = use_fsdp
+            device = torch.device(f"cuda:{self.local_rank}")
         else:
             self.rank = 0
             self.world_size = 1
             self.local_rank = 0
-            self.use_fsdp = False
-            if self.rank == 0:
-                print(f"ℹ️  单卡训练模式")
+            self.is_distributed = False
         
-        # TensorBoard（仅主进程）
+        # ✅ 步骤 2: 将模型移到 device
+        model = model.to(device)
+        
+        # ✅ 步骤 3: FSDP 包装（必须在优化器创建前）
+        if use_fsdp and self.is_distributed:
+            model = self._wrap_fsdp(model, sharding_strategy, mixed_precision, min_num_params)
+        
+        # ✅ 步骤 4: 创建优化器
+        if optimizer is None and optimizer_config is not None:
+            optimizer = self._create_optimizer(model, optimizer_config)
+        
+        # ✅ 步骤 5: 创建调度器
+        if scheduler is None and scheduler_config is not None:
+            scheduler = self._create_scheduler(optimizer, scheduler_config)
+        
+        # ✅ 步骤 6: 调用父类初始化
+        super().__init__(
+            model=model,
+            train_loader=train_loader,
+            test_loader=test_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epochs=epochs,
+            device=device,
+            beta=beta,
+            save_dir=save_dir,
+            save_interval=save_interval,
+        )
+        
+        # TensorBoard
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
@@ -114,52 +91,43 @@ class FSDPTrainer(BaseTrainer):
         
         self.global_step = 0
         
-        # FSDP 配置
+        # FSDP 配置存储
         self.sharding_strategy = sharding_strategy
         self.mixed_precision = mixed_precision
         self.min_num_params = min_num_params
         
-        # 包装 FSDP
-        if self.use_fsdp and self.is_distributed:
-            self._setup_fsdp()
-        
-        # ✅ FSDP 包装后创建优化器和调度器
-        self._setup_optimizer_scheduler()
+        if self.rank == 0:
+            print(f"✅ FSDPTrainer 初始化完成")
+            if self.is_distributed:
+                print(f"   分布式: 是，{self.world_size} 张 GPU")
+                print(f"   分片策略: {sharding_strategy}")
+            else:
+                print(f"   分布式: 否，单卡模式")
     
-    def _setup_fsdp(self):
-        """初始化 FSDP 模型包装"""
-        torch.cuda.set_device(self.local_rank)
-        # ✅ 只移动到对应的 GPU，不调用 .to(device)
-        # FSDP 会自动处理设备分配
-        if not next(self.model.parameters()).is_cuda:
-            self.model = self.model.to(self.local_rank)
-        
-        # 设置分片策略
+    def _wrap_fsdp(self, model, sharding_strategy, mixed_precision, min_num_params):
+        """包装模型为 FSDP"""
         sharding_strategy_map = {
             "FULL_SHARD": ShardingStrategy.FULL_SHARD,
             "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,
             "NO_SHARD": ShardingStrategy.NO_SHARD,
         }
-        strategy = sharding_strategy_map.get(self.sharding_strategy, ShardingStrategy.FULL_SHARD)
+        strategy = sharding_strategy_map.get(sharding_strategy, ShardingStrategy.FULL_SHARD)
         
-        # 自动分片策略
         auto_wrap_policy = partial(
             size_based_auto_wrap_policy,
-            min_num_params=self.min_num_params
+            min_num_params=min_num_params
         )
         
-        # 混合精度配置
         mixed_precision_policy = None
-        if self.mixed_precision:
+        if mixed_precision:
             mixed_precision_policy = MixedPrecision(
                 param_dtype=torch.float16,
                 reduce_dtype=torch.float16,
                 buffer_dtype=torch.float16,
             )
         
-        # 包装 FSDP
-        self.model = FSDP(
-            self.model,
+        model = FSDP(
+            model,
             auto_wrap_policy=auto_wrap_policy,
             sharding_strategy=strategy,
             mixed_precision=mixed_precision_policy,
@@ -167,73 +135,64 @@ class FSDPTrainer(BaseTrainer):
         )
         
         if self.rank == 0:
-            print(f"✅ FSDP 模型已包装")
-            print(f"   分片策略: {self.sharding_strategy}")
-            print(f"   混合精度: {self.mixed_precision}")
-            print(f"   使用 GPU 数: {self.world_size}")
-            
-            # ✅ 打印参数量（验证分片）
-            total_params = sum(p.numel() for p in self.model.parameters())
-            print(f"   本 GPU 参数量: {total_params / 1e6:.2f}M")
+            print(f"✅ FSDP 包装完成")
+        
+        return model
     
-    def _setup_optimizer_scheduler(self):
-        """✅ 在 FSDP 包装后创建优化器和调度器"""
-        # 创建优化器
-        opt_cfg = self.optimizer_config
-        if opt_cfg['type'] == 'Adam':
-            self.opt = torch.optim.Adam(
-                self.model.parameters(),
-                lr=opt_cfg['lr'],
-                weight_decay=opt_cfg['weight_decay'],
-                betas=opt_cfg['betas']
+    def _create_optimizer(self, model, optimizer_config):
+        """创建优化器"""
+        if optimizer_config is None:
+            return None
+        
+        opt_type = optimizer_config.get('type', 'Adam')
+        lr = optimizer_config.get('lr', 1e-4)
+        
+        if opt_type == 'Adam':
+            return torch.optim.Adam(
+                model.parameters(),
+                lr=lr,
+                weight_decay=optimizer_config.get('weight_decay', 1e-5),
+                betas=optimizer_config.get('betas', (0.9, 0.999)),
             )
-        elif opt_cfg['type'] == 'AdamW':
-            self.opt = torch.optim.AdamW(
-                self.model.parameters(),
-                lr=opt_cfg['lr'],
-                weight_decay=opt_cfg['weight_decay'],
-                betas=opt_cfg['betas']
-            )
-        elif opt_cfg['type'] == 'SGD':
-            self.opt = torch.optim.SGD(
-                self.model.parameters(),
-                lr=opt_cfg['lr'],
-                weight_decay=opt_cfg['weight_decay'],
-                momentum=opt_cfg.get('momentum', 0.9)
+        elif opt_type == 'AdamW':
+            return torch.optim.AdamW(
+                model.parameters(),
+                lr=lr,
+                weight_decay=optimizer_config.get('weight_decay', 1e-5),
             )
         else:
-            raise ValueError(f"不支持的优化器类型: {opt_cfg['type']}")
+            raise ValueError(f"不支持的优化器: {opt_type}")
+    
+    def _create_scheduler(self, optimizer, scheduler_config):
+        """创建学习率调度器"""
+        if scheduler_config is None or optimizer is None:
+            return None
         
-        # 创建调度器
-        sch_cfg = self.scheduler_config
-        if sch_cfg.get('type') == 'CosineAnnealingLR':
-            self.sch = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.opt,
-                T_max=sch_cfg['T_max'],
-                eta_min=sch_cfg['eta_min']
+        sched_type = scheduler_config.get('type', 'CosineAnnealingLR')
+        
+        if sched_type == 'CosineAnnealingLR':
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=scheduler_config.get('T_max', 30),
+                eta_min=scheduler_config.get('eta_min', 1e-6),
             )
-        elif sch_cfg.get('type') == 'StepLR':
-            self.sch = torch.optim.lr_scheduler.StepLR(
-                self.opt,
-                step_size=sch_cfg.get('step_size', 10),
-                gamma=sch_cfg.get('gamma', 0.1)
+        elif sched_type == 'StepLR':
+            return torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=scheduler_config.get('step_size', 10),
+                gamma=scheduler_config.get('gamma', 0.1),
             )
-        elif sch_cfg.get('type') is None:
-            self.sch = None
         else:
-            raise ValueError(f"不支持的调度器类型: {sch_cfg['type']}")
-        
-        if self.rank == 0:
-            print(f"✅ 优化器已创建: {opt_cfg['type']} (lr={opt_cfg['lr']})")
-            if self.sch is not None:
-                print(f"✅ 调度器已创建: {sch_cfg['type']}")
+            raise ValueError(f"不支持的调度器: {sched_type}")
     
     def _set_sampler_epoch(self, epoch):
-        """设置 DistributedSampler 的 epoch，保证随机性"""
+        """设置 DistributedSampler 的 epoch"""
         if hasattr(self.trainlo, 'sampler') and isinstance(
             self.trainlo.sampler, torch.utils.data.distributed.DistributedSampler
         ):
             self.trainlo.sampler.set_epoch(epoch)
+    
+    # ...existing code...
     
     def train_one_epoch(self, epoch):
         """单轮训练（FSDP 版本）"""
