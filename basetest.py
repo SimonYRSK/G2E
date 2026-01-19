@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint 
 from timm.layers.helpers import to_2tuple
 from timm.models.swin_transformer_v2 import SwinTransformerV2Stage
+from einops import rearrange
 
 class ModuleFactory:
     def create_block(dim, out_dim, depth, input_resolution, window_size, **kwargs):
@@ -102,57 +104,6 @@ class PatchEmbedding(nn.Module):
         return x
 
 
-
-class PatchMerge(nn.Module):
-    def __init__(self, in_channels, out_channels=None, norm_layer=nn.LayerNorm):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels or in_channels * 2
-         
-        self.reduction = nn.Linear(in_channels * 4, self.out_channels, bias=False)
-        self.norm = norm_layer(in_channels * 4) if norm_layer else nn.Identity()
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        assert H % 2 == 0 and W % 2 == 0
-        
-        x = x.view(B, C, H // 2, 2, W // 2, 2)
-        x = x.permute(0, 2, 4, 1, 3, 5)
-        x = x.reshape(B, H // 2, W // 2, C * 4)
-        
-        x = self.norm(x)
-        x = self.reduction(x)
-        x = x.permute(0, 3, 1, 2).contiguous()
-        
-        print(f"PatchMerge output: {x.shape}")
-        return x
-
-
-class PatchExpansion(nn.Module):
-    def __init__(self, in_channels, out_channels=None):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels or in_channels // 2
-        
-        self.expansion = nn.Linear(in_channels, self.out_channels * 4, bias=False)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        assert C % 2 == 0
-        
-        x = x.permute(0, 2, 3, 1)                       # (B, H, W, C)
-        x = self.expansion(x)                           # (B, H, W, out*4)
-        x = x.view(B, H, W, self.out_channels, 2, 2)
-        x = x.permute(0, 3, 1, 4, 2, 5)
-        x = x.reshape(B, self.out_channels, H * 2, W * 2)
-        x = x.contiguous()
-        
-        print(f"PatchExpansion output: {x.shape}")
-        return x
-
-
-
-
 class ResBlock(nn.Module):
     def __init__(self, num_groups, ch):
         super().__init__()
@@ -219,7 +170,10 @@ class Encoder(nn.Module):
     def forward(self, x):
         for down, res in zip(self.down, self.res):
             x = down(x)
-            x = res(x)
+            if self.using_checkpoints:
+                x = checkpoint.checkpoint(res, x, use_reentrant=False)
+            else:
+                x = res(x)
 
         x = x.permute(0, 2, 3, 1)
 
@@ -269,7 +223,10 @@ class Decoder(nn.Module):
 
 
         for res, up in zip(self.res, self.up):
-            x = res(x)
+            if self.using_checkpoints:
+                x = checkpoint.checkpoint(res, x, use_reentrant=False)
+            else:
+                x = res(x)
             x = up(x)
 
         return x
@@ -331,6 +288,38 @@ class VAE(nn.Module):
 
         z = self.decoder(z)
         return z, mu, log_var
+    
+
+
+class PatchHead(nn.Module):
+    def __init__(self, embed_dim, out_chans, patch_size=(4,4)):
+        super().__init__()
+
+        self.patch_size = patch_size
+        self.out_chans = out_chans
+        self.head = nn.Linear(embed_dim, out_chans * patch_size[0] * patch_size[1])
+
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        feat_h, feat_w = H, W
+
+        x = x.flatten(2).transpose(1, 2)
+        
+        x = self.head(x)           # (B, H, W, out_chans * patch_size * patch_size)
+        x = rearrange(
+            x,
+            'n (h w) (p1 p2 c) -> n c (h p1) (w p2)',
+            h=feat_h,   # 180
+            w=feat_w,   # 360
+            p1=self.patch_size[0],    # 4
+            p2=self.patch_size[1],    # 4
+            c=self.out_chans       # 70
+        )
+        # 输出: (B, out_chans, H*p1, W*p2) = (B, 70, 720, 1440)
+        
+        return x
   
 
 class G2E(nn.Module):
@@ -339,6 +328,7 @@ class G2E(nn.Module):
         img_size=(721, 1440),
         patch_size=(4, 4),
         in_chans=10,
+        out_chans = None,
         embed_dim=1536,
         num_groups=32,
         num_heads=8,
@@ -351,7 +341,7 @@ class G2E(nn.Module):
     ):
         super().__init__()
         self.in_chans = in_chans
-        self.out_chans = in_chans
+        self.out_chans = in_chans if out_chans is None else out_chans
         self.patch_size = patch_size
         self.img_size = img_size
         input_resolution = int(img_size[0] / patch_size[0]), int(img_size[1] / patch_size[1])
@@ -368,23 +358,24 @@ class G2E(nn.Module):
             num_heads,
         )
         
-        self.fc = nn.Linear(embed_dim, self.out_chans * 4 * 4)
+        self.patch_head = PatchHead(embed_dim, self.out_chans, patch_size)
         
 
     def forward(self, x):
         print(f"Input: {x.shape}")
         
-        
-        x = self.patch_emb(x)
-
-        
+        if self.training:
+            x = checkpoint.checkpoint(self.patch_emb, x, use_reentrant=False)
+        else:
+            x = self.patch_emb(x)
        
         x, mu, log_var = self.mid_layer(x)
 
+        #x的输出尺寸是180*360
 
-        #... to do ...     
+        if self.training:
+            x = checkpoint.checkpoint(self.patch_head, x, use_reentrant=False)
         
-        # 补齐奇数维度（721×1440）
         x = F.interpolate(x, size=self.img_size, mode='bilinear', align_corners=False)
         
         return x
