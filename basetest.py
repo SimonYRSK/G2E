@@ -1,414 +1,407 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from timm.layers.helpers import to_2tuple
+from timm.models.swin_transformer_v2 import SwinTransformerV2Stage
 
-# ========== 工厂函数 ==========
-def make_norm(norm: str, ch: int):
-    if norm == "bn":
-        return nn.BatchNorm2d(ch)
-    if norm == "in":
-        return nn.InstanceNorm2d(ch, affine=True)
-    if norm == "gn":
-        return nn.GroupNorm(8, ch)
-    raise ValueError(f"unknown norm {norm}")
+class ModuleFactory:
+    def create_block(dim, out_dim, depth, input_resolution, window_size, **kwargs):
+        
+        
+        return SwinTransformerV2Stage(
+            dim= dim,
+            out_dim = out_dim,
+            window_size=window_size,
+            depth=depth,
+            input_resolution=input_resolution,  # 固定分辨率！
+            num_heads=kwargs.get("num_heads", 8),           
+            use_checkpoint=kwargs.get("use_checkpoint", False)
+        )
 
-def make_act(act: str):
-    return {"relu": nn.ReLU(inplace=True), "silu": nn.SiLU(), "gelu": nn.GELU()}.get(act, nn.ReLU(inplace=True))
+def get_pad3d(input_resolution, window_size):
+    Pl, Lat, Lon = input_resolution
+    win_pl, win_lat, win_lon = window_size
 
-# ========== 基础模块库 ==========
+    padding_left = padding_right = padding_top = padding_bottom = padding_front = padding_back = 0
+    pl_remainder = Pl % win_pl
+    lat_remainder = Lat % win_lat
+    lon_remainder = Lon % win_lon
+
+    if pl_remainder:
+        pl_pad = win_pl - pl_remainder
+        padding_front = pl_pad // 2
+        padding_back = pl_pad - padding_front
+    if lat_remainder:
+        lat_pad = win_lat - lat_remainder
+        padding_top = lat_pad // 2
+        padding_bottom = lat_pad - padding_top
+    if lon_remainder:
+        lon_pad = win_lon - lon_remainder
+        padding_left = lon_pad // 2
+        padding_right = lon_pad - padding_left
+
+    return padding_left, padding_right, padding_top, padding_bottom, padding_front, padding_back
+
+def get_pad2d(input_resolution, window_size):
+    """
+    Args:
+        input_resolution (tuple[int]): Lat, Lon
+        window_size (tuple[int]): Lat, Lon
+
+    Returns:
+        padding (tuple[int]): (padding_left, padding_right, padding_top, padding_bottom)
+    """
+    input_resolution = [2] + list(input_resolution)
+    window_size = [2] + list(window_size)
+    padding = get_pad3d(input_resolution, window_size)
+    return padding[: 4]
+
+
+
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, img_size=(721, 1440), patch_size=(4, 4), in_chans=4, embed_dim=96, norm_layer=nn.LayerNorm):
+        super().__init__()
+        
+        # 注意：这里 img_size[2] 会报错，因为 img_size 是 2D 元组，只有 2 个元素
+        # 修正：patches_resolution 只用前两个维度
+        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.in_chans = in_chans
+        self.embed_dim = embed_dim
+        
+        self.proj = nn.Conv2d(
+            in_channels=in_chans,
+            out_channels=embed_dim,
+            kernel_size=patch_size,
+            stride=patch_size
+        )
+        
+        self.norm = norm_layer(embed_dim) if norm_layer else None
+        self.patches_resolution = patches_resolution  # 保存分辨率用于后续 reshape
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        assert H == self.img_size[0] and W == self.img_size[1], \
+            f"Input size ({H}×{W}) doesn't match model ({self.img_size[0]}×{self.img_size[1]})"
+        
+        x = self.proj(x)                        # (B, embed_dim, H', W')
+        print(f"After proj: {x.shape}")
+        
+
+        if self.norm is not None:
+            # LayerNorm 需要 (B, H', W', C) 格式
+            x = x.permute(0, 2, 3, 1)  # NCHW -> NHWC
+            x = self.norm(x)
+            x = x.permute(0, 3, 1, 2)  # NHWC -> NCHW
+        
+        
+        
+        return x
+
+
+
+class PatchMerge(nn.Module):
+    def __init__(self, in_channels, out_channels=None, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels or in_channels * 2
+         
+        self.reduction = nn.Linear(in_channels * 4, self.out_channels, bias=False)
+        self.norm = norm_layer(in_channels * 4) if norm_layer else nn.Identity()
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        assert H % 2 == 0 and W % 2 == 0
+        
+        x = x.view(B, C, H // 2, 2, W // 2, 2)
+        x = x.permute(0, 2, 4, 1, 3, 5)
+        x = x.reshape(B, H // 2, W // 2, C * 4)
+        
+        x = self.norm(x)
+        x = self.reduction(x)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        
+        print(f"PatchMerge output: {x.shape}")
+        return x
+
+
+class PatchExpansion(nn.Module):
+    def __init__(self, in_channels, out_channels=None):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels or in_channels // 2
+        
+        self.expansion = nn.Linear(in_channels, self.out_channels * 4, bias=False)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        assert C % 2 == 0
+        
+        x = x.permute(0, 2, 3, 1)                       # (B, H, W, C)
+        x = self.expansion(x)                           # (B, H, W, out*4)
+        x = x.view(B, H, W, self.out_channels, 2, 2)
+        x = x.permute(0, 3, 1, 4, 2, 5)
+        x = x.reshape(B, self.out_channels, H * 2, W * 2)
+        x = x.contiguous()
+        
+        print(f"PatchExpansion output: {x.shape}")
+        return x
+
+
+
 
 class ResBlock(nn.Module):
-    def __init__(self, ch, norm="gn", act="silu"):
+    def __init__(self, num_groups, ch):
         super().__init__()
         self.conv1 = nn.Conv2d(ch, ch, 3, padding=1)
-        self.norm1 = make_norm(norm, ch)
-        self.act = make_act(act)
+        self.norm1 = nn.GroupNorm(num_groups, ch)
+        self.act = nn.SiLU()
         self.conv2 = nn.Conv2d(ch, ch, 3, padding=1)
-        self.norm2 = make_norm(norm, ch)
+        self.norm2 = nn.GroupNorm(num_groups, ch)
 
     def forward(self, x):
         h = self.act(self.norm1(self.conv1(x)))
         h = self.norm2(self.conv2(h))
         return self.act(h + x)
-
-class ChannelAttention(nn.Module):
-    def __init__(self, ch, reduction=16):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Conv2d(ch, ch // reduction, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(ch // reduction, ch, 1),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        return x * self.fc(x)
-
-class FrequencyModule(nn.Module):
-    def __init__(self, ch, freq_ratio=0.5):
-        super().__init__()
-        self.freq_ratio = freq_ratio
-    
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x_fft = torch.fft.rfft2d(x)
-        h_cut = int(H * self.freq_ratio)
-        w_cut = int(W * self.freq_ratio + 1)
-        x_fft[:, :, h_cut:, w_cut:] *= 0.5
-        x_ifft = torch.fft.irfft2d(x_fft, s=(H, W))
-        return x_ifft
-
-class SpatialTransformer(nn.Module):
-    def __init__(self, ch, nhead=4, stride=4, ff_mult=4, depth=1):
-        super().__init__()
-        self.stride = stride
-        self.proj_in = nn.Conv2d(ch, ch, 1)
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model=ch,
-            nhead=nhead,
-            dim_feedforward=ch * ff_mult,
-            dropout=0.1,
-            batch_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=depth)
-        self.proj_out = nn.Conv2d(ch, ch, 1)
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        h = self.proj_in(x)
-        h = F.avg_pool2d(h, kernel_size=self.stride, stride=self.stride)
-        _, _, hs, ws = h.shape
-        h = h.flatten(2).transpose(1, 2)
-        h = self.encoder(h)
-        h = h.transpose(1, 2).reshape(B, C, hs, ws)
-        h = F.interpolate(h, size=(H, W), mode="bilinear", align_corners=False)
-        h = self.proj_out(h)
-        return h + x
-
-# ========== 模块工厂 ==========
-
-class ModuleFactory:
-    """根据字符串名称创建模块"""
-    
-    @staticmethod
-    def create_block(block_type: str, ch: int, norm="gn", act="silu", **kwargs):
-        if block_type == "resblock":
-            return ResBlock(ch, norm, act)
-        elif block_type == "channel_attn":
-            return ChannelAttention(ch, reduction=kwargs.get("reduction", 16))
-        elif block_type == "freq":
-            return FrequencyModule(ch, freq_ratio=kwargs.get("freq_ratio", 0.5))
-        elif block_type == "transformer":
-            return SpatialTransformer(
-                ch,
-                nhead=kwargs.get("nhead", 4),
-                stride=kwargs.get("stride", 4),
-                ff_mult=kwargs.get("ff_mult", 4),
-                depth=kwargs.get("depth", 1)
-            )
-        else:
-            raise ValueError(f"Unknown block type: {block_type}")
-    
-    @staticmethod
-    def create_downsample(in_ch: int, out_ch: int, down_type="conv", **kwargs):
-        if down_type == "conv":
-            return nn.Conv2d(in_ch, out_ch, 3, stride=2, padding=1)
-        elif down_type == "maxpool":
-            return nn.Sequential(
-                nn.MaxPool2d(2),
-                nn.Conv2d(in_ch, out_ch, 1)
-            )
-        else:
-            raise ValueError(f"Unknown down_type: {down_type}")
-    
-    @staticmethod
-    def create_upsample(in_ch: int, out_ch: int, up_type="deconv", **kwargs):
-        if up_type == "deconv":
-            return nn.ConvTranspose2d(in_ch, out_ch, 2, stride=2)
-        elif up_type == "upsample":
-            return nn.Sequential(
-                nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
-                nn.Conv2d(in_ch, out_ch, 1)
-            )
-        else:
-            raise ValueError(f"Unknown up_type: {up_type}")
-
-# ========== 完全可插拔 Encoder ==========
-
-class FlexibleEncoder(nn.Module):
-    """
-    完全可插拔的编码器：
-    encoder_cfg = {
-        "stage0": {
-            "blocks": ["resblock", "resblock", "channel_attn"],
-            "down": "conv"
-        },
-        "stage1": {
-            "blocks": ["resblock", "transformer"],
-            "down": "conv"
-        },
-        ...
-    }
-    """
-    
-    def __init__(self, in_ch, widths, encoder_cfg, norm="gn", act="silu", **block_kwargs):
-        super().__init__()
-        self.stem = nn.Conv2d(in_ch, widths[0], 3, padding=1)
-        self.enc_blocks = nn.ModuleList()
-        self.downs = nn.ModuleList()
         
-        for i in range(len(widths)):
-            ch = widths[i]
-            stage_key = f"stage{i}"
-            
-            # 获取该 stage 的配置（如无则用默认）
-            stage_cfg = encoder_cfg.get(stage_key, {"blocks": ["resblock"], "down": "conv"})
-            blocks_list = stage_cfg.get("blocks", ["resblock"])
-            down_type = stage_cfg.get("down", "conv")
-            
-            # 构建该 stage 的块
-            blocks = nn.ModuleList()
-            for block_name in blocks_list:
-                if block_name == "resblock":
-                    blocks.append(ResBlock(ch, norm, act))
-                else:
-                    block = ModuleFactory.create_block(block_name, ch, norm, act, **block_kwargs)
-                    blocks.append(block)
-            
-            self.enc_blocks.append(nn.Sequential(*blocks))
-            
-            # 下采样（最后一层除外）
-            if i < len(widths) - 1:
-                down = ModuleFactory.create_downsample(ch, widths[i+1], down_type, **block_kwargs)
-                self.downs.append(down)
+
+class Downblock(nn.Module):
+    def __init__(self, in_chans, out_chans):
+        super().__init__()
+        self.conv = nn.Conv2d(in_chans, out_chans, kernel_size = 3, stride = 2, padding = 1)
+      
+    def forward(self, x):
         
-        self.downs.append(None)
+        x = self.conv(x)
+        return x
+
+class Upblock(nn.Module):
+    def __init__(self, in_chans, out_chans, out_size):
+        super().__init__()
+        self.size = out_size
+        self.conv = nn.Conv2d(in_chans, out_chans, kernel_size=3, stride=1, padding=1)
+        
+    def forward(self, x):
+
+        return self.conv(F.interpolate(x, size = tuple(self.size), mode = "bilinear"))
+
+class Encoder(nn.Module):
+    def __init__(self, dim, num_groups, num_stages, output_reso, swin_depth, window_size, num_heads, using_checkpoints = True):
+        super().__init__()
+        self.down = nn.ModuleList()
+        self.res = nn.ModuleList()
+
+        input_reso = int(output_reso[0] // (2**num_stages)), int(output_reso[1] // (2**num_stages))
+        input_reso = list(input_reso)
+
+        for i in range(num_stages):
+            self.down.append(Downblock(dim, dim))
+            self.res.append(ResBlock(num_groups, dim))
+
+        self.using_checkpoints = using_checkpoints
+
+
+
+        self.swin = SwinTransformerV2Stage(
+            dim= dim,
+            out_dim = dim,
+            window_size=window_size,
+            depth=swin_depth,
+            output_nchw = True,
+            input_resolution=input_reso,  # 固定分辨率！
+            num_heads= num_heads,           
+            
+        )
 
     def forward(self, x):
-        feats = []
-        h = self.stem(x)
-        for i, block in enumerate(self.enc_blocks):
-            h = block(h)
-            feats.append(h)
-            if self.downs[i] is not None:
-                h = self.downs[i](h)
-        return h, feats
+        for down, res in zip(self.down, self.res):
+            x = down(x)
+            x = res(x)
 
-# ========== 完全可插拔 Decoder ==========
+        x = x.permute(0, 2, 3, 1)
 
-class FlexibleDecoder(nn.Module):
-    """
-    完全可插拔的解码器：
-    decoder_cfg = {
-        "stage0": {
-            "blocks": ["resblock", "resblock"],
-            "up": "deconv"
-        },
-        "stage1": {
-            "blocks": ["resblock", "transformer"],
-            "up": "upsample"
-        },
-        ...
-    }
-    """
-    
-    def __init__(self, out_ch, widths, decoder_cfg, norm="gn", act="silu", **block_kwargs):
+        if self.using_checkpoints:
+            self.swin.grad_checkpointing = True
+
+        x = self.swin(x)
+       
+
+        return x
+
+
+class Decoder(nn.Module):
+    def __init__(self, dim, num_groups, num_stages, output_reso, swin_depth, window_size, num_heads, using_checkpoints = True):
         super().__init__()
         self.up = nn.ModuleList()
-        self.dec_blocks = nn.ModuleList()
-        
-        for i in range(len(widths) - 1, 0, -1):
-            in_ch = widths[i]
-            skip_ch = widths[i - 1]
-            stage_key = f"stage{i-1}"
-            
-            # 获取该 stage 的配置
-            stage_cfg = decoder_cfg.get(stage_key, {"blocks": ["resblock"], "up": "deconv"})
-            blocks_list = stage_cfg.get("blocks", ["resblock"])
-            up_type = stage_cfg.get("up", "deconv")
-            
-            # 上采样
-            up = ModuleFactory.create_upsample(in_ch, skip_ch, up_type, **block_kwargs)
-            self.up.append(up)
-            
-            # 拼接后的通道压缩 + 块堆叠
-            blocks = [
-                nn.Conv2d(skip_ch * 2, skip_ch, kernel_size=1),
-                make_norm(norm, skip_ch),
-                make_act(act),
-            ]
-            
-            for block_name in blocks_list:
-                if block_name == "resblock":
-                    blocks.append(ResBlock(skip_ch, norm, act))
-                else:
-                    block = ModuleFactory.create_block(block_name, skip_ch, norm, act, **block_kwargs)
-                    blocks.append(block)
-            
-            self.dec_blocks.append(nn.Sequential(*blocks))
-        
-        self.head = nn.Conv2d(widths[0], out_ch, 1)
+        self.res = nn.ModuleList()
+        out_size = list(output_reso)
+        input_reso = int(output_reso[0] // (2**num_stages)), int(output_reso[1] // (2**num_stages))
+        input_reso = list(input_reso)
 
-    def forward(self, h, feats):
-        for i, up in enumerate(self.up):
-            h = up(h)
-            skip = feats[-(i + 2)]
-            if h.shape[2:] != skip.shape[2:]:
-                H = min(h.shape[2], skip.shape[2])
-                W = min(h.shape[3], skip.shape[3])
-                h = h[:, :, :H, :W]
-                skip = skip[:, :, :H, :W]
-            h = torch.cat([h, skip], dim=1)
-            h = self.dec_blocks[i](h)
-        return self.head(h)
+        self.using_checkpoints = using_checkpoints
 
-# ========== 完全可插拔 VAE ==========
+        for i in range(num_stages):
+            self.up.append(Upblock(dim, dim, out_size))
+            self.res.append(ResBlock(num_groups, dim))
 
-class VAEUNetFlex(nn.Module):
-    def __init__(
-        self,
-        in_ch=10,
-        out_ch=10,
-        widths=(64, 128, 256),
-        encoder_cfg=None,
-        decoder_cfg=None,
-        norm="gn",
-        act="silu",
-        latent_dim=None,
-        **block_kwargs
-    ):
+        self.swin = SwinTransformerV2Stage(
+            dim= dim,
+            out_dim = dim,
+            window_size=window_size,
+            depth=swin_depth,
+            output_nchw = True,
+            input_resolution=input_reso,  # 固定分辨率！
+            num_heads= num_heads,           
+            
+        )
+
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)
+
+        if self.using_checkpoints:
+            self.swin.grad_checkpointing = True
+            
+        x = self.swin(x)
+
+
+        for res, up in zip(self.res, self.up):
+            x = res(x)
+            x = up(x)
+
+        return x
+
+
+
+
+class VAE(nn.Module):
+    def __init__(self, dim, num_groups, num_stages, output_reso, swin_depth, window_size, num_heads, using_checkpoints = True, **kwarg):
         super().__init__()
-        self.widths = widths
-        self.latent_dim = latent_dim or widths[-1]
-        
-        # 默认配置
-        if encoder_cfg is None:
-            encoder_cfg = {
-                f"stage{i}": {"blocks": ["resblock"], "down": "conv"}
-                for i in range(len(widths))
-            }
-        
-        if decoder_cfg is None:
-            decoder_cfg = {
-                f"stage{i}": {"blocks": ["resblock"], "up": "deconv"}
-                for i in range(len(widths) - 1)
-            }
-        
-        self.encoder = FlexibleEncoder(in_ch, widths, encoder_cfg, norm, act, **block_kwargs)
-        
-        bott_ch = widths[-1]
-        self.mu = nn.Conv2d(bott_ch, self.latent_dim, 1)
-        self.logvar = nn.Conv2d(bott_ch, self.latent_dim, 1)
-        nn.init.constant_(self.logvar.weight, -5.0)
-        nn.init.constant_(self.logvar.bias, -5.0)
-        
-        self.lat2feat = nn.Conv2d(self.latent_dim, bott_ch, 1)
-        self.decoder = FlexibleDecoder(out_ch, widths, decoder_cfg, norm, act, **block_kwargs)
 
-    @staticmethod
-    def _pad_to_multiple(x, mult=4):
-        _, _, h, w = x.shape
-        pad_h = (mult - h % mult) % mult
-        pad_w = (mult - w % mult) % mult
-        x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
-        return x, (h, w)
+        window_size = to_2tuple(window_size)
+       
 
-    def reparameterize(self, mu, logvar):
-        logvar = torch.clamp(logvar, -10.0, 10.0)
-        std = torch.exp(0.5 * logvar) + 1e-6
+        self.latent_dim = dim
+        
+        self.encoder = Encoder(
+            dim,
+            num_groups,
+            num_stages,
+            output_reso,
+            swin_depth,
+            window_size, 
+            num_heads,
+            using_checkpoints = True,
+
+        )
+        
+        self.mu_proj = nn.Conv2d(dim, self.latent_dim, kernel_size=1)
+        self.log_var_proj = nn.Conv2d(dim, self.latent_dim, kernel_size=1)
+        self.latent2feat = nn.Conv2d(self.latent_dim, dim, kernel_size=1)
+        
+        self.decoder = Decoder(
+            dim,
+            num_groups,
+            num_stages,
+            output_reso,
+            swin_depth,
+            window_size, 
+            num_heads,
+            using_checkpoints = True,
+
+        )
+
+
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
         eps = torch.randn_like(std)
         return mu + eps * std
 
+
     def forward(self, x):
-        if x.dim() == 5:
-            x = x.squeeze(2)
-        
-        x, orig_hw = self._pad_to_multiple(x, mult=4)
-        h, feats = self.encoder(x)
-        
-        mu = self.mu(h)
-        logvar = self.logvar(h)
-        z = self.reparameterize(mu, logvar)
-        h = self.lat2feat(z)
-        
-        out = self.decoder(h, feats)
-        H, W = orig_hw
-        out = out[:, :, :H, :W]
-        out = F.interpolate(out, size=(721, 1440), mode="bilinear", align_corners=False)
-        return out, mu, logvar
+        x = self.encoder(x)
 
+        mu = self.mu_proj(x)
+        log_var = self.log_var_proj(x)
+        z = self.reparameterize(mu, log_var)
+        z = self.latent2feat(z)
+
+        z = self.decoder(z)
+        return z, mu, log_var
+  
+
+class G2E(nn.Module):
+    def __init__(
+        self,
+        img_size=(721, 1440),
+        patch_size=(4, 4),
+        in_chans=10,
+        embed_dim=1536,
+        num_groups=32,
+        num_heads=8,
+        num_stages=2,
+        window_size=9,
+        depth = 12,
+        latent_dim = 1536,
+        **kwargs
+
+    ):
+        super().__init__()
+        self.in_chans = in_chans
+        self.out_chans = in_chans
+        self.patch_size = patch_size
+        self.img_size = img_size
+        input_resolution = int(img_size[0] / patch_size[0]), int(img_size[1] / patch_size[1])
+
+        self.patch_emb = PatchEmbedding(img_size, patch_size, in_chans, embed_dim)
+        
+        self.mid_layer = VAE(
+            embed_dim,
+            num_groups,
+            num_stages,
+            input_resolution,
+            depth,
+            window_size, 
+            num_heads,
+        )
+        
+        self.fc = nn.Linear(embed_dim, self.out_chans * 4 * 4)
+        
+
+    def forward(self, x):
+        print(f"Input: {x.shape}")
+        
+        
+        x = self.patch_emb(x)
+
+        
+       
+        x, mu, log_var = self.mid_layer(x)
+
+
+        #... to do ...     
+        
+        # 补齐奇数维度（721×1440）
+        x = F.interpolate(x, size=self.img_size, mode='bilinear', align_corners=False)
+        
+        return x
+
+
+# 测试代码
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    B, C = 2, 10
-    x = torch.randn(B, C, 1, 721, 1440, device=device).squeeze(2)
-
-    # ========== 方案 1: 基础 Baseline ==========
-    model1 = VAEUNetFlex(
-        in_ch=C, out_ch=C,
-        widths=(64, 128, 256),
-        encoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "down": "conv"},
-            "stage1": {"blocks": ["resblock", "resblock"], "down": "conv"},
-            "stage2": {"blocks": ["resblock", "resblock"], "down": "conv"},
-        },
-        decoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "up": "deconv"},
-            "stage1": {"blocks": ["resblock", "resblock"], "up": "deconv"},
-        },
+    device = "cuda"
+    print(f"using:{device}")
+    
+    x = torch.randn(2, 10, 721, 1440).to(device)
+    
+    model = G2E(
+        img_size=(721, 1440),
+        patch_size=(4, 4),
+        in_chans=10,
+        embed_dim=1536,  
     ).to(device)
 
-    # ========== 方案 2: 加入注意力 ==========
-    model2 = VAEUNetFlex(
-        in_ch=C, out_ch=C,
-        widths=(64, 128, 256),
-        encoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "down": "conv"},
-            "stage1": {"blocks": ["resblock", "transformer"], "down": "conv"},
-            "stage2": {"blocks": ["resblock", "transformer"], "down": "conv"},
-        },
-        decoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "up": "deconv"},
-            "stage1": {"blocks": ["resblock", "transformer"], "up": "deconv"},
-        },
-        nhead=4, stride=4, ff_mult=4, depth=1,
-    ).to(device)
-
-    # ========== 方案 3: 混合模块 ==========
-    model3 = VAEUNetFlex(
-        in_ch=C, out_ch=C,
-        widths=(64, 128, 256),
-        encoder_cfg={
-            "stage0": {"blocks": ["resblock", "channel_attn"], "down": "conv"},
-            "stage1": {"blocks": ["resblock", "freq", "transformer"], "down": "maxpool"},
-            "stage2": {"blocks": ["resblock", "channel_attn"], "down": "conv"},
-        },
-        decoder_cfg={
-            "stage0": {"blocks": ["resblock", "channel_attn"], "up": "upsample"},
-            "stage1": {"blocks": ["resblock", "freq"], "up": "deconv"},
-        },
-        nhead=8, stride=4, ff_mult=4, depth=1,
-    ).to(device)
-
-    # ========== 方案 4: 深层模型 ==========
-    model4 = VAEUNetFlex(
-        in_ch=C, out_ch=C,
-        widths=(64, 128, 256, 512),
-        encoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "down": "conv"},
-            "stage1": {"blocks": ["resblock", "resblock", "channel_attn"], "down": "conv"},
-            "stage2": {"blocks": ["resblock", "resblock", "transformer"], "down": "conv"},
-            "stage3": {"blocks": ["resblock", "transformer"], "down": "conv"},
-        },
-        decoder_cfg={
-            "stage0": {"blocks": ["resblock", "resblock"], "up": "deconv"},
-            "stage1": {"blocks": ["resblock", "transformer"], "up": "deconv"},
-            "stage2": {"blocks": ["resblock", "channel_attn"], "up": "upsample"},
-        },
-        nhead=8, stride=4, ff_mult=4, depth=2,
-    ).to(device)
-
-    for i, model in enumerate([model1, model2, model3, model4], 1):
-        y, mu, logvar = model(x)
-        params = sum(p.numel() for p in model.parameters())
-        print(f"Model {i}: output={y.shape}, params={params/1e6:.2f}M")
+    out = model(x)
