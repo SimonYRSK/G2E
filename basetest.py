@@ -166,6 +166,8 @@ class Encoder(nn.Module):
             num_heads= num_heads,           
             
         )
+        if self.using_checkpoints:
+            self.swin.grad_checkpointing = True
 
     def forward(self, x):
         for down, res in zip(self.down, self.res):
@@ -176,11 +178,8 @@ class Encoder(nn.Module):
                 x = res(x)
 
         x = x.permute(0, 2, 3, 1)
-
-        if self.using_checkpoints:
-            self.swin.grad_checkpointing = True
-
         x = self.swin(x)
+        x = x.permute(0, 3, 1, 2) 
        
 
         return x
@@ -211,16 +210,15 @@ class Decoder(nn.Module):
             num_heads= num_heads,           
             
         )
+        if self.using_checkpoints:
+            self.swin.grad_checkpointing = True
 
 
     def forward(self, x):
         x = x.permute(0, 2, 3, 1)
 
-        if self.using_checkpoints:
-            self.swin.grad_checkpointing = True
-            
         x = self.swin(x)
-
+        x = x.permute(0, 3, 1, 2) 
 
         for res, up in zip(self.res, self.up):
             if self.using_checkpoints:
@@ -280,6 +278,7 @@ class VAE(nn.Module):
 
     def forward(self, x):
         x = self.encoder(x)
+        print(f"After Encoder: {x.shape}")
 
         mu = self.mu_proj(x)
         log_var = self.log_var_proj(x)
@@ -368,13 +367,19 @@ class G2E(nn.Module):
             x = checkpoint.checkpoint(self.patch_emb, x, use_reentrant=False)
         else:
             x = self.patch_emb(x)
+
+        print(f"After Patch Embedding: {x.shape}")
        
         x, mu, log_var = self.mid_layer(x)
-
+        print(f"After VAE: {x.shape}")
         #x的输出尺寸是180*360
 
         if self.training:
             x = checkpoint.checkpoint(self.patch_head, x, use_reentrant=False)
+
+        else:
+            x = self.patch_head(x)
+        print(f"After Patch Head: {x.shape}")
         
         x = F.interpolate(x, size=self.img_size, mode='bilinear', align_corners=False)
         
@@ -382,11 +387,19 @@ class G2E(nn.Module):
 
 
 # 测试代码
+
+# 测试代码
 if __name__ == "__main__":
     device = "cuda"
-    print(f"using:{device}")
+    print(f"using: {device}")
     
-    x = torch.randn(2, 10, 721, 1440).to(device)
+    # 打印初始显存
+    print(f"Initial GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    
+    x = torch.randn(13, 10, 721, 1440).to(device)
+    target = torch.randn(13, 10, 721, 1440).to(device)  # 目标数据
+    
+    print(f"After data load GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
     
     model = G2E(
         img_size=(721, 1440),
@@ -394,5 +407,43 @@ if __name__ == "__main__":
         in_chans=10,
         embed_dim=1536,  
     ).to(device)
+    
+    print(f"After model load GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+    
+    # ========== 训练逻辑 ==========
+    model.train()  # 切换到训练模式（checkpoint 只在 train 模式生效）
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    criterion = nn.MSELoss()
+    from torch.cuda.amp import autocast, GradScaler
+    scaler = torch.cuda.amp.GradScaler()
+    num_epochs = 3
+    
+    for epoch in range(num_epochs):
+        optimizer.zero_grad(set_to_none=True)
+        print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
+        print(f"Before forward GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
 
-    out = model(x)
+        with torch.cuda.amp.autocast():
+            out = model(x)
+            loss = criterion(out, target)
+
+        print(f"After forward GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB, loss={loss.item():.6f}")
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        # 清理与统计
+        torch.cuda.synchronize()
+        print(f"After step GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
+        print(f"Peak GPU memory: {torch.cuda.max_memory_allocated()/1024**3:.2f} GB")
+
+        # 清理缓存并重置 peak 统计（有助于下一 epoch 内存分配）
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+    
+    print("\n========== Training completed ==========")
+    print(f"Final GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+    print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
