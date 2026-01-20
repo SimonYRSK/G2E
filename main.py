@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from trainers.fsdptrain import FSDPTrainer
 from models.vae import G2E
-from data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
+from data.data import GFSReader, ERA5Reader, GFSERA5PairDataset, collate_fn
 
 torch.backends.cudnn.deterministic = False   # 允许选择最优算法
 torch.backends.cudnn.benchmark = True
