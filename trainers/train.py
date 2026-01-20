@@ -41,16 +41,24 @@ class BaseTrainer:
 
     def cal_losses(self, x_recon, y, mu, log_var, weight=None):        
         
-        kl_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+        device_type = self.device.type if isinstance(self.device, torch.device) else "cuda"
+        
+        with torch.amp.autocast(device_type=device_type, enabled=False):
+            x_recon = x_recon.float()
+            y = y.float()
+            mu = mu.float()
+            log_var = log_var.float()
+            
+            kl_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
 
-        se = (x_recon - y) ** 2
+            se = (x_recon - y) ** 2
 
-        if weight is not None:
-            se = se * weight
+            if weight is not None:
+                se = se * weight.float()
 
-        recon_loss = torch.mean(se)
+            recon_loss = torch.mean(se)
 
-        return kl_loss, recon_loss
+            return kl_loss, recon_loss
     
 
     def save_checkpoint(self, epoch):
@@ -95,7 +103,7 @@ class BaseTrainer:
 
         for batch_idx, (x, y, t) in enumerate(pbar):
             # 你的数据: (N, C, H, W) → 加 T=1 维
-            x = x.unsqueeze(2).to(self.device)
+            x = x.to(self.device)
             y = y.to(self.device)
 
             weights = self.lat_weight(y.shape)
@@ -117,6 +125,10 @@ class BaseTrainer:
             total_kl_loss += kl_item
 
             self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.opt)
+
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+
             self.scaler.step(self.opt)
             self.scaler.update()
 
