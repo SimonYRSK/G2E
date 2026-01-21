@@ -383,7 +383,7 @@ class G2E(nn.Module):
         
         x = F.interpolate(x, size=self.img_size, mode='bilinear', align_corners=False)
         
-        return x
+        return x, mu, log_var
 
 
 # 测试代码

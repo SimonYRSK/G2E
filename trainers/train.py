@@ -20,7 +20,7 @@ class BaseTrainer:
         self.save_dir = save_dir
         self.save_interval = save_interval
         self.use_amp = use_amp
-        self.scaler = torch.amp.GradScaler(enabled=use_amp)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -97,25 +97,30 @@ class BaseTrainer:
         total_recon_loss = 0.0
         total_kl_loss = 0.0
 
+        # 统计用
+        total_t_data = 0.0      # dataloader + to(device)
+        total_t_model = 0.0     # forward + backward + step
+
         pbar = tqdm(self.trainlo, desc=f"Epoch {epoch+1}/{self.epochs}")
 
-        device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device).split(':')[0]
-
         for batch_idx, (x, y, t) in enumerate(pbar):
-            # 你的数据: (N, C, H, W) → 加 T=1 维
-            x = x.to(self.device)
-            y = y.to(self.device)
+            t0 = time.perf_counter()
+
+            # ======= 数据部分：从 dataloader 取 + 拷到 GPU =======
+            x = x.to(self.device, non_blocking=True)
+            y = y.to(self.device, non_blocking=True)
 
             weights = self.lat_weight(y.shape)
-
             self.opt.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast(device_type=device_type, enabled=self.use_amp):
+            t1 = time.perf_counter()
+
+            # ======= 模型部分：前向 + 反向 + step =======
+            with autocast(enabled=self.use_amp):
                 x_recon, mu, log_var = self.model(x)
                 kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var, weight=weights)
                 loss = kl_loss * self.beta + recon_loss
 
-            # 记录标量
             loss_item = float(loss.detach())
             recon_item = float(recon_loss.detach())
             kl_item = float(kl_loss.detach())
@@ -126,26 +131,41 @@ class BaseTrainer:
 
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.opt)
-
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
-
             self.scaler.step(self.opt)
             self.scaler.update()
+
+            t2 = time.perf_counter()
+
+            # 累积时间
+            total_t_data += (t1 - t0)
+            total_t_model += (t2 - t1)
+
+            # 只在前几个 batch 打印一次详细拆分
+            if batch_idx < 3:
+                pbar.write(
+                    f"[batch {batch_idx}] data={t1-t0:.3f}s, model={t2-t1:.3f}s, loss={loss_item:.4f}"
+                )
 
             pbar.set_postfix({
                 'Loss': f'{loss_item:.4f}',
                 'Recon': f'{recon_item:.4f}',
                 'KL': f'{kl_item:.4f}',
             })
-        
+
         self.sch.step()
 
-        avg_loss = total_loss / len(self.trainlo)
-        avg_recon = total_recon_loss / len(self.trainlo)
-        avg_kl = total_kl_loss / len(self.trainlo)
-        
+        n_batches = len(self.trainlo)
+        avg_loss = total_loss / n_batches
+        avg_recon = total_recon_loss / n_batches
+        avg_kl = total_kl_loss / n_batches
+
+        avg_t_data = total_t_data / n_batches
+        avg_t_model = total_t_model / n_batches
+
         print(f"\nEpoch {epoch+1} 训练集平均:")
-        print(f"总损失={avg_loss:.5f}, 重建={avg_recon:.5f}, 散度={avg_kl:.5f}")
+        print(f"  总损失={avg_loss:.5f}, 重建={avg_recon:.5f}, 散度={avg_kl:.5f}")
+        print(f"  平均每 batch: data={avg_t_data:.3f}s, model={avg_t_model:.3f}s")
 
 
     def train(self, resume_path=None):
