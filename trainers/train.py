@@ -20,7 +20,7 @@ class BaseTrainer:
         self.save_dir = save_dir
         self.save_interval = save_interval
         self.use_amp = use_amp
-        self.scaler = torch.amp.GradScaler(enabled=use_amp)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -29,9 +29,7 @@ class BaseTrainer:
         """纬度加权"""
         H = shape[-2]
         lat = torch.linspace(-90 + 180/(2*H), 90 - 180/(2*H), H, device=self.device)
-
         weight = torch.cos(torch.deg2rad(lat))
-
         weight = weight / weight.mean()
 
         view_shape = [1] * len(shape)
@@ -74,7 +72,7 @@ class BaseTrainer:
         print(f"Checkpoint saved to {file_path}")
 
     def load_checkpoint(self, path, strict=True):
-        """加载检查点"""
+        
         print(f"Loading checkpoint from {path} ...")
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
@@ -101,8 +99,7 @@ class BaseTrainer:
 
         device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device).split(':')[0]
 
-        for batch_idx, (x, y, t) in enumerate(pbar):
-            # 你的数据: (N, C, H, W) → 加 T=1 维
+        for batch_idx, (x, y) in enumerate(pbar):
             x = x.to(self.device)
             y = y.to(self.device)
 
@@ -115,7 +112,6 @@ class BaseTrainer:
                 kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var, weight=weights)
                 loss = kl_loss * self.beta + recon_loss
 
-            # 记录标量
             loss_item = float(loss.detach())
             recon_item = float(recon_loss.detach())
             kl_item = float(kl_loss.detach())
@@ -158,6 +154,5 @@ class BaseTrainer:
         for epoch in range(start_epoch, self.epochs):
             self.train_one_epoch(epoch)
             
-            # 间隔保存
             if (epoch + 1) % self.save_interval == 0:
                 self.save_checkpoint(epoch)
