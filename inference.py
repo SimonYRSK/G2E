@@ -10,6 +10,7 @@ from data.pairset import GFS2ERA5Dataset
 from models.base import G2E
 from torch.utils.data import DataLoader, DistributedSampler
 import multiprocessing as mp
+
 try:
     mp.set_start_method('spawn', force=True)
 except RuntimeError:
@@ -20,7 +21,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"):
-        
+    print("load G2E")
     model = G2E(
         img_size=(721, 1440),
         patch_size=(4, 4),
@@ -34,17 +35,20 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
     model.load_state_dict(checkpoint['model_state_dict'])
 
     model.to(device)
+    print("model loaded")
 
     model.eval()
-
+    pbar = tqdm(test_loader)
+    
     preds = []
+    print("inferencing...")
     with torch.no_grad():
-        for x, _ in test_loader:
+        for batch_idx, (x, _) in enumerate(pbar):
             x = x.to(device)
             out, _, _ = model(x)
             preds.append(out.cpu().numpy())
     arr = np.concatenate(preds, axis=0)
-
+    print("saving as zarr")
     ds_gfs = xr.open_zarr(gfs_path)
 
 
@@ -65,7 +69,7 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
 if __name__ == "__main__":
 
     test_set = GFS2ERA5Dataset(
-        start = "2022-01-01 06:00:00",
+        start = "2022-01-01 00:00:00",
         end = "2022-01-01 18:00:00"
     )
 
