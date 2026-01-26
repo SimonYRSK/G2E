@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from trainers.train import BaseTrainer
 from models.base import G2E
-from data import GFS2ERA5Dataset
+from data.pairset import GFS2ERA5Dataset
 
 import multiprocessing as mp
 try:
@@ -37,10 +37,10 @@ def main():
     dataloader = DataLoader(
         train_set,
         batch_size=8,
-        shuffle=False,  # 训练时设为True，测试耗时设为False避免额外开销
-        num_workers=6,  # 先测试单线程，后续可改为多线程对比
-        pin_memory=True,  # GPU训练时开启，加速数据传输
-        drop_last=False,  # 保留最后一个不足batch_sizes的批次
+        shuffle=False,  
+        num_workers=3,  
+        pin_memory=True, 
+        drop_last=False,  
     )
     
     
@@ -49,7 +49,8 @@ def main():
         img_size=(721, 1440),
         patch_size=(4, 4),
         in_chans=70,
-        embed_dim=1536,  
+        embed_dim=1536, 
+        depth = 4, 
     ).to(device)
     
 
@@ -74,10 +75,10 @@ def main():
         test_loader=None,
         optimizer=optimizer,
         scheduler=scheduler,
-        epochs=3,
+        epochs=60,
         device=device,
-        beta=1e-4,
-        save_dir="/home/ximutian/checkpoints/test",
+        beta=1e-3,
+        save_dir="/home/ximutian/checkpoints/baseline_1_25",
         save_interval=1,
         use_amp=False,   
     )

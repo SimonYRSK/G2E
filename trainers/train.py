@@ -21,6 +21,12 @@ class BaseTrainer:
         self.save_interval = save_interval
         self.use_amp = use_amp
         self.scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+        self.best_loss = float('inf')
+
+        self.writer = SummaryWriter(
+            log_dir="/home/ximutian/tensorboard_logs"
+        )
+        print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -59,17 +65,22 @@ class BaseTrainer:
             return kl_loss, recon_loss
     
 
-    def save_checkpoint(self, epoch):
-        file_path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch+1}.pth")
-        state = {
-            'epoch': epoch + 1,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.opt.state_dict(),
-            'scheduler_state_dict': self.sch.state_dict() if self.sch else None,
-            'scaler_state_dict': self.scaler.state_dict() if self.use_amp else None,
-        }
-        torch.save(state, file_path)
-        print(f"Checkpoint saved to {file_path}")
+    def save_checkpoint(self, epoch, current_avg_loss):
+        improve = current_avg_loss < self.best_loss
+        if improve:
+            self.best_loss = current_avg_loss
+            file_path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch+1}.pth")
+            state = {
+                'epoch': epoch + 1,
+                'model_state_dict': self.model.state_dict(),
+                'optimizer_state_dict': self.opt.state_dict(),
+                'scheduler_state_dict': self.sch.state_dict() if self.sch else None,
+                'scaler_state_dict': self.scaler.state_dict() if self.use_amp else None,
+            }
+            torch.save(state, file_path)
+            print(f"Checkpoint saved to {file_path}")
+
+            self.writer.add_scalar("best/train_loss", current_avg_loss, epoch)
 
     def load_checkpoint(self, path, strict=True):
         
@@ -133,6 +144,12 @@ class BaseTrainer:
                 'Recon': f'{recon_item:.4f}',
                 'KL': f'{kl_item:.4f}',
             })
+
+            if batch_idx % 10 == 0 and hasattr(self, 'writer') and self.writer:
+                step = epoch * len(self.trainlo) + batch_idx
+                self.writer.add_scalar("Loss/batch/total", loss_item, step)
+                self.writer.add_scalar("Loss/batch/recon", recon_item, step)
+                self.writer.add_scalar("Loss/batch/kl",    kl_item,    step)
         
         self.sch.step()
 
@@ -143,6 +160,18 @@ class BaseTrainer:
         print(f"\nEpoch {epoch+1} 训练集平均:")
         print(f"总损失={avg_loss:.5f}, 重建={avg_recon:.5f}, 散度={avg_kl:.5f}")
 
+        global_step = epoch
+
+        self.writer.add_scalar("Loss/train/total",    avg_loss,  global_step)
+        self.writer.add_scalar("Loss/train/recon",    avg_recon, global_step)
+        self.writer.add_scalar("Loss/train/kl",       avg_kl,    global_step)
+        self.writer.add_scalar("Loss/train/kl_scaled", avg_kl * self.beta, global_step)
+        self.writer.add_scalar("hyper/beta",          self.beta,  global_step)
+        self.writer.add_scalar("hyper/lr",            self.opt.param_groups[0]['lr'], global_step)
+
+
+        return avg_loss
+
 
     def train(self, resume_path=None):
         start_epoch = 0
@@ -151,8 +180,19 @@ class BaseTrainer:
         if resume_path is not None:
             start_epoch, best_metric = self.load_checkpoint(resume_path, strict=True)
 
-        for epoch in range(start_epoch, self.epochs):
-            self.train_one_epoch(epoch)
-            
-            if (epoch + 1) % self.save_interval == 0:
-                self.save_checkpoint(epoch)
+        try:
+
+            for epoch in range(start_epoch, self.epochs):
+                avg_loss = self.train_one_epoch(epoch)
+                
+                if (epoch + 1) % self.save_interval == 0:
+                    self.save_checkpoint(epoch, avg_loss)
+
+        finally:
+            if hasattr(self, 'writer') and self.writer:
+                self.writer.close()        
+                print("TensorBoard writer closed.")
+
+
+    
+
