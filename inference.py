@@ -19,7 +19,7 @@ torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-def inference(checkpoint_path, map_location, save_path, test_loader, gfs_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"):
+def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"):
         
     model = G2E(
         img_size=(721, 1440),
@@ -39,10 +39,10 @@ def inference(checkpoint_path, map_location, save_path, test_loader, gfs_path = 
 
     preds = []
     with torch.no_grad():
-        for x, _ in test_loader
-        x = x.to(device)
-        out, _, _ = model(x)
-        preds.append(out.cpu().numpy())
+        for x, _ in test_loader:
+            x = x.to(device)
+            out, _, _ = model(x)
+            preds.append(out.cpu().numpy())
     arr = np.concatenate(preds, axis=0)
 
     ds_gfs = xr.open_zarr(gfs_path)
@@ -77,10 +77,11 @@ if __name__ == "__main__":
         pin_memory=True, 
         drop_last=False,  
     )
+    print("loaded")
 
     inference(
         checkpoint_path = "/home/ximutian/checkpoints/baseline_1_25/checkpoint_epoch_21.pth",
-        map_location = "cuda",
+        device = "cuda",
         save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/transformed_gfs",
         test_loader = test_loader,
     )
