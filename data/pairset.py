@@ -33,8 +33,8 @@ TARGET_CHANNELS = [
     "msl", "tp"
 ]
 
-START_TIME = "2020-01-01 00:00:00"
-END_TIME = "2021-3-31 00:00:00"
+START_TIME = "2022-05-06 00:00:00"
+END_TIME = "2023-12-31 18:00:00"
 
 ERA5_PATH = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/datasets/era5.rtm.02_25.6h.c109.new3/"
 GFS_PATH = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"

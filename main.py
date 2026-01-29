@@ -53,7 +53,7 @@ def main():
         depth = 4, 
     ).to(device)
     
-
+    num_epochs = 70
     
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
@@ -65,7 +65,7 @@ def main():
     )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        T_max=30,
+        T_max=num_epochs,
         eta_min=1e-6,
     )
 
@@ -75,7 +75,7 @@ def main():
         test_loader=None,
         optimizer=optimizer,
         scheduler=scheduler,
-        epochs=60,
+        epochs=num_epochs,
         device=device,
         beta=1e-3,
         save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_29",
@@ -85,7 +85,10 @@ def main():
 
 
 
-    trainer.train(resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth")
+    trainer.train(
+        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth",
+        only_model = True
+    )
 
 if __name__ == "__main__":
     main()

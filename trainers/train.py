@@ -82,20 +82,21 @@ class BaseTrainer:
 
             self.writer.add_scalar("best/train_loss", current_avg_loss, epoch)
 
-    def load_checkpoint(self, path, strict=True):
+    def load_checkpoint(self, path, strict=True, only_model=False):
         
         print(f"Loading checkpoint from {path} ...")
         checkpoint = torch.load(path, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
+        if not only_model:
         
-        if 'optimizer_state_dict' in checkpoint and self.opt:
-            self.opt.load_state_dict(checkpoint['optimizer_state_dict'])
-            
-        if 'scheduler_state_dict' in checkpoint and self.sch and checkpoint['scheduler_state_dict']:
-            self.sch.load_state_dict(checkpoint['scheduler_state_dict'])
+            if 'optimizer_state_dict' in checkpoint and self.opt:
+                self.opt.load_state_dict(checkpoint['optimizer_state_dict'])
+                
+            if 'scheduler_state_dict' in checkpoint and self.sch and checkpoint['scheduler_state_dict']:
+                self.sch.load_state_dict(checkpoint['scheduler_state_dict'])
 
-        if 'scaler_state_dict' in checkpoint and self.scaler:
-            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            if 'scaler_state_dict' in checkpoint and self.scaler:
+                self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             
         start_epoch = checkpoint.get('epoch', 0)
         return start_epoch, None
@@ -173,12 +174,12 @@ class BaseTrainer:
         return avg_loss
 
 
-    def train(self, resume_path=None):
+    def train(self, resume_path=None, only_model = False):
         start_epoch = 0
         best_metric = None
         
         if resume_path is not None:
-            start_epoch, best_metric = self.load_checkpoint(resume_path, strict=True)
+            start_epoch, best_metric = self.load_checkpoint(resume_path, strict=True, only_model = only_model)
 
         try:
 
