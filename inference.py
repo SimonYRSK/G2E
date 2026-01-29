@@ -10,6 +10,10 @@ from data.pairset import GFS2ERA5Dataset
 from models.base import G2E
 from torch.utils.data import DataLoader, DistributedSampler
 import multiprocessing as mp
+import numpy as np
+import xarray as xr
+import zarr
+import pandas as pd
 
 try:
     mp.set_start_method('spawn', force=True)
@@ -84,7 +88,7 @@ if __name__ == "__main__":
     print("loaded")
 
     inference(
-        checkpoint_path = "/home/ximutian/checkpoints/baseline_1_25/checkpoint_epoch_21.pth",
+        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_25/checkpoint_epoch_32.pth",
         device = "cuda",
         save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/transformed_gfs",
         test_loader = test_loader,
