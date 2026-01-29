@@ -7,11 +7,11 @@ import torch.distributed as dist
 import os
 
 class BaseTrainer:
-    def __init__(self, model, train_loader, test_loader, optimizer, scheduler, epochs, device, beta, 
+    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, epochs, device, beta, 
                  save_dir: str = "./checkpoints", save_interval: int = 1, use_amp: bool = False):
         self.model = model
         self.trainlo = train_loader
-        self.testlo = test_loader
+        self.vallo = val_loader
         self.opt = optimizer
         self.sch = scheduler
         self.epochs = epochs
@@ -101,6 +101,47 @@ class BaseTrainer:
         start_epoch = checkpoint.get('epoch', 0)
         return start_epoch, None
 
+    def validate_one_epoch(self, epoch):
+        self.model.eval()
+        total_loss = 0.0
+        total_recon_loss = 0.0
+        total_kl_loss = 0.0
+        num_batches = 0
+
+        device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device).split(':')[0]
+
+        with torch.no_grad():
+            for x, y in self.vallo:
+                x = x.to(self.device)
+                y = y.to(self.device)
+                weights = self.lat_weight(y.shape)
+                with torch.amp.autocast(device_type=device_type, enabled=self.use_amp):
+                    x_recon, mu, log_var = self.model(x)
+                    kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var, weight=weights)
+                    loss = kl_loss * self.beta + recon_loss
+
+                total_loss += float(loss.detach())
+                total_recon_loss += float(recon_loss.detach())
+                total_kl_loss += float(kl_loss.detach())
+                num_batches += 1
+
+        avg_loss = total_loss / num_batches
+        avg_recon = total_recon_loss / num_batches
+        avg_kl = total_kl_loss / num_batches
+
+        print(f"\nEpoch {epoch+1} 验证集平均:")
+        print(f"总损失={avg_loss:.5f}, 重建={avg_recon:.5f}, 散度={avg_kl:.5f}")
+
+        global_step = epoch
+
+        if hasattr(self, 'writer') and self.writer:
+            self.writer.add_scalar("Loss/val/total",    avg_loss,  global_step)
+            self.writer.add_scalar("Loss/val/recon",    avg_recon, global_step)
+            self.writer.add_scalar("Loss/val/kl",       avg_kl,    global_step)
+            self.writer.add_scalar("Loss/val/kl_scaled", avg_kl * self.beta, global_step)
+
+        return avg_loss
+
     def train_one_epoch(self, epoch):
         self.model.train()
         total_loss = 0.0
@@ -185,7 +226,7 @@ class BaseTrainer:
 
             for epoch in range(start_epoch, self.epochs):
                 avg_loss = self.train_one_epoch(epoch)
-                
+                val_loss = self.validate_one_epoch(epoch)
                 if (epoch + 1) % self.save_interval == 0:
                     self.save_checkpoint(epoch, avg_loss)
 
