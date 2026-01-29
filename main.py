@@ -42,8 +42,20 @@ def main():
         pin_memory=True, 
         drop_last=False,  
     )
+
+    val_set = GFS2ERA5Dataset(
+        start="2024-5-06 00:00:00",
+        end="2024-5-31 18:00:00",
+    )
     
-    
+    val_loader = DataLoader(
+        val_set,
+        batch_size=8,
+        shuffle=False,  
+        num_workers=3,  
+        pin_memory=True, 
+        drop_last=False,  
+    )
     
     model = G2E(
         img_size=(721, 1440),
@@ -72,7 +84,7 @@ def main():
     trainer = BaseTrainer(
         model=model,
         train_loader=dataloader,
-        test_loader=None,
+        val_loader=val_loader,
         optimizer=optimizer,
         scheduler=scheduler,
         epochs=num_epochs,
