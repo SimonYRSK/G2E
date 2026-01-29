@@ -32,7 +32,10 @@ def main():
 
     set_random_seed(42)
 
-    train_set = GFS2ERA5Dataset()
+    train_set = GFS2ERA5Dataset(
+        start="2023-01-01 00:00:00",
+        end="2023-12-31 18:00:00",
+    )
 
     dataloader = DataLoader(
         train_set,
@@ -44,8 +47,8 @@ def main():
     )
 
     val_set = GFS2ERA5Dataset(
-        start="2024-5-06 00:00:00",
-        end="2024-5-31 18:00:00",
+        start="2024-05-06 00:00:00",
+        end="2024-05-07 18:00:00",
     )
     
     val_loader = DataLoader(
@@ -62,7 +65,7 @@ def main():
         patch_size=(4, 4),
         in_chans=70,
         embed_dim=1536, 
-        depth = 4, 
+        depth = 8, 
     ).to(device)
     
     num_epochs = 70
@@ -71,7 +74,7 @@ def main():
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=1e-4,
+        lr=5e-4,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
@@ -89,7 +92,7 @@ def main():
         scheduler=scheduler,
         epochs=num_epochs,
         device=device,
-        beta=1e-3,
+        beta=5e-4,
         save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_29",
         save_interval=1,
         use_amp=False,   
@@ -97,10 +100,10 @@ def main():
 
 
 
-    trainer.train(
-        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth",
-        only_model = True
-    )
+    trainer.train()
+        #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth",
+        #only_model = True
+    
 
 if __name__ == "__main__":
     main()
