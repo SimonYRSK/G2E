@@ -78,14 +78,14 @@ def main():
         epochs=60,
         device=device,
         beta=1e-3,
-        save_dir="/home/ximutian/checkpoints/baseline_1_25",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_29",
         save_interval=1,
         use_amp=False,   
     )
 
 
 
-    trainer.train()
+    trainer.train(resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth")
 
 if __name__ == "__main__":
     main()

@@ -36,14 +36,14 @@ TARGET_CHANNELS = [
 START_TIME = "2020-01-01 00:00:00"
 END_TIME = "2021-3-31 00:00:00"
 
-ERA5_PATH = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/dataset/era5.2002_2024.c85.p25.h6"
+ERA5_PATH = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/datasets/era5.rtm.02_25.6h.c109.new3/"
 GFS_PATH = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"
 
 
 class GFS2ERA5Dataset(Dataset):
     def __init__(self, target_channels = None, start: str = None, end: str = None, x_path: str = None, y_path: str = None):
-        self.x_path = ERA5_PATH if x_path is None else x_path
-        self.y_path = GFS_PATH if y_path is None else y_path
+        self.x_path = GFS_PATH if x_path is None else x_path
+        self.y_path = ERA5_PATH if y_path is None else y_path
         self.target_channels = TARGET_CHANNELS if target_channels is None else target_channels
 
 

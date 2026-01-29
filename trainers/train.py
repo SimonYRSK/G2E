@@ -24,7 +24,7 @@ class BaseTrainer:
         self.best_loss = float('inf')
 
         self.writer = SummaryWriter(
-            log_dir="/home/ximutian/tensorboard_logs"
+            log_dir="/home/ximutian/tensorboard_logs/1_29"
         )
         print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
 

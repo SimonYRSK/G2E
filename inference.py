@@ -59,22 +59,33 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
     time_list = test_loader.dataset.time_list
     ds_gfs_sel = ds_gfs.sel(time=pd.to_datetime(time_list))
 
+    new_ds = xr.Dataset(
+        {
+            "data": (("time", "channel", "lat", "lon"), arr)
+        },
+        coords={
+            "time": ds_gfs_sel.time,
+            "channel": ds_gfs_sel.channel,
+            "lat": ds_gfs_sel.lat,
+            "lon": ds_gfs_sel.lon,
+        },
+        attrs=ds_gfs_sel.attrs  # 可选，继承原有属性
+    )
+
     assert list(ds_gfs_sel.channel.values) == list(TARGET_CHANNELS), "channel顺序不一致"
     assert arr.shape == ds_gfs_sel["data"].shape, f"shape不一致: {arr.shape} vs {ds_gfs_sel['data'].shape}"
-
-    ds_gfs_sel["data"].values[:] = arr
 
     if os.path.exists(save_path):
         import shutil
         shutil.rmtree(save_path)
-    ds_gfs_sel.to_zarr(save_path, consolidated=True)
+    new_ds.to_zarr(save_path, consolidated=True)
     print(f"推理结果已保存为zarr: {save_path}")
 
 if __name__ == "__main__":
 
     test_set = GFS2ERA5Dataset(
-        start = "2022-01-01 00:00:00",
-        end = "2022-01-01 18:00:00"
+        start = "2024-01-01 00:00:00",
+        end = "2024-01-01 18:00:00"
     )
 
     test_loader = DataLoader(
@@ -88,8 +99,8 @@ if __name__ == "__main__":
     print("loaded")
 
     inference(
-        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_25/checkpoint_epoch_32.pth",
+        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth",
         device = "cuda",
-        save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/transformed_gfs",
+        save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline1_28",
         test_loader = test_loader,
     )

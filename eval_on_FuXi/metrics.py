@@ -7,15 +7,26 @@ import matplotlib.pyplot as plt
 import warnings
 from pathlib import Path
 
-
-
-
-PRED_ROOT_ERA5 = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/era5/20221201-12"
-PRED_ROOT_TRANS_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_trans_gfs/20221201-12"
+# 新路径
+PRED_ROOT_RTM = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/eval/RTM_base_6h/20240101-12"
+PRED_ROOT_ERA5 = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/era5/20240101-12"
+PRED_ROOT_NAIVE_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_naive_gfs/20240101-12"
+PRED_ROOT_TRANS_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_trans_gfs/20240101-12"
 ERA5_ROOT = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/datasets/era5.rtm.02_25.6h.c109.new3/"
 TARGET_CHANNEL = "z500"
-STEPS = [f"{i:03d}" for i in range(1, 39)]  # 001~038
 
+# 第一步：确定时间步范围（STEPS）
+def get_steps(pred_root):
+    files = os.listdir(pred_root)
+    zarr_files = [f for f in files if f.endswith('.zarr')]
+    steps = [f.split('.')[0] for f in zarr_files if f.split('.')[0].isdigit()]
+    steps = sorted(steps)  # 按字符串排序，如 '001', '002', ...
+    if not steps:
+        raise ValueError(f"No .zarr files found in {pred_root}")
+    print(f"Found steps: {steps}")
+    return steps
+
+# 获取预测 z500
 def get_pred_z500(pred_dir, time):
     ds = xr.open_zarr(pred_dir)
     chs = ds['channel'].values
@@ -32,6 +43,7 @@ def get_pred_z500(pred_dir, time):
     ds.close()
     return arr
 
+# 获取真值 z500
 def get_true_z500(time):
     ds = xr.open_zarr(ERA5_ROOT)
     chs = ds['channel'].values
@@ -58,9 +70,13 @@ def get_true_z500(time):
     ds.close()
     return arr
 
+# 计算 RMSE
 def calc_rmse(pred, true):
-    mask = ~np.isnan(pred) & ~np.isnan(true)
-    return np.sqrt(np.mean((pred[mask] - true[mask]) ** 2))
+    # pred, true: xarray.DataArray，带lat/lon
+    weights = np.cos(np.deg2rad(np.abs(true.lat)))
+    error = (pred - true) ** 2
+    rmse = np.sqrt(error.weighted(weights).mean(("lat", "lon")))
+    return float(rmse.compute())
 
 def get_anomaly(x, clim):
     # x: DataArray, 带有 time 维
@@ -76,116 +92,72 @@ def compute_acc(out, tgt, clim):
     B = (wlat * out**2).sum(("lat", "lon"), skipna=True)
     C = (wlat * tgt**2).sum(("lat", "lon"), skipna=True)
     acc = A / np.sqrt(B * C + 1e-12)
-    return acc.item()  # 转为标量
+    return float(acc.compute())  # 先compute，再转float
+
+# 主逻辑
+STEPS = get_steps(PRED_ROOT_TRANS_GFS)  # 自动确定 STEPS
 
 # 预测起始时间（需与预测步长对应）
-start_time = pd.Timestamp("2022-12-10 12:00:00")
+start_time = pd.Timestamp("2024-01-01 12:00:00")  # 原代码中的起始时间，假设相同
 hour_interval = 6  # 步长间隔
-times = [start_time + pd.Timedelta(hours=hour_interval * i) for i in range(len(STEPS))]
+times = [start_time + pd.Timedelta(hours=hour_interval * int(step)) for step in STEPS]  # 注意 int(step) 因为 step 是 '001' 等
 clim = xr.open_zarr("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/eval/era5/clim.daily")
 
-ds_era5 = xr.open_zarr(ERA5_ROOT)
-lat_arr = ds_era5['lat'].values
-ds_era5.close()
+rmse_rtm = []
+rmse_era5 = []
+rmse_naive_gfs = []
+rmse_trans_gfs = []
 
-rmse_era5, acc_era5 = [], []
-rmse_gfs, acc_gfs = [], []
-mean_era5, mean_pred_era5, mean_pred_gfs = [], [], []
+acc_rtm = []
+acc_era5 = []
+acc_naive_gfs = []
+acc_trans_gfs = []
+
 for i, step in enumerate(STEPS):
-    pred_dir_era5 = os.path.join(PRED_ROOT_ERA5, f"{step}.zarr")
-    pred_dir_gfs = os.path.join(PRED_ROOT_TRANS_GFS, f"{step}.zarr")
+    trans_gfs_dir = os.path.join(PRED_ROOT_TRANS_GFS, f"{step}.zarr")
+    naive_gfs_dir = os.path.join(PRED_ROOT_NAIVE_GFS, f"{step}.zarr")
+    era5_dir = os.path.join(PRED_ROOT_ERA5, f"{step}.zarr")
     # 预测
-    pred_era5 = get_pred_z500(pred_dir_era5, times[i])
-    pred_gfs = get_pred_z500(pred_dir_gfs, times[i])
+    pred_trans_gfs = get_pred_z500(trans_gfs_dir, times[i])
+    pred_naive_gfs = get_pred_z500(naive_gfs_dir, times[i])
+    pred_era5 = get_pred_z500(era5_dir, times[i])
     # 真实
     true = get_true_z500(times[i])
-    # 评估
-    rmse_era5.append(calc_rmse(pred_era5.values, true.values))
-    rmse_gfs.append(calc_rmse(pred_gfs.values, true.values))
+    # 评估 RMSE
+    rmse_trans_gfs.append(calc_rmse(pred_trans_gfs, true))
+    rmse_naive_gfs.append(calc_rmse(pred_naive_gfs, true))
+    rmse_era5.append(calc_rmse(pred_era5, true))
+
+    acc_trans_gfs.append(compute_acc(pred_trans_gfs, true, clim))
+    acc_naive_gfs.append(compute_acc(pred_naive_gfs, true, clim))
     acc_era5.append(compute_acc(pred_era5, true, clim))
-    acc_gfs.append(compute_acc(pred_gfs, true, clim))
-    mean_era5.append(np.nanmean(true.values))
-    mean_pred_era5.append(np.nanmean(pred_era5.values))
-    mean_pred_gfs.append(np.nanmean(pred_gfs.values))
-    print(f"Step {step}: ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | GFS RMSE={rmse_gfs[-1]:.3f}, ACC={acc_gfs[-1]:.3f}")
-# 绘图
-plt.figure(figsize=(10,5))
-plt.plot(range(1,39), rmse_era5, label='FuXi-ERA5 Init RMSE', marker='o')
-plt.plot(range(1,39), rmse_gfs, label='FuXi-GFS Init RMSE', marker='o')
-plt.xlabel('Forecast Step')
-plt.ylabel('RMSE')
-plt.title('RMSE vs Forecast Step (z500)')
-plt.legend()
-plt.grid()
-plt.tight_layout()
-plt.savefig("z500_rmse_curve.png")
-plt.close()
+    print(f"Step {step}: GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
+
+# 可选：绘图 RMSE 曲线
+# plt.figure(figsize=(10,5))
+# plt.plot([int(s) for s in STEPS], rmse_era5, label='ERA5 RMSE', marker='o')
+# plt.plot([int(s) for s in STEPS], rmse_naive_gfs, label='Naive_GFS RMSE', marker='o')
+# plt.plot([int(s) for s in STEPS], rmse_trans_gfs, label='Trans_GFS RMSE', marker='o')
+# plt.xlabel('Forecast Step')
+# plt.ylabel('RMSE')
+# plt.title('RMSE (z500)')
+# plt.legend()
+# plt.grid()
+# plt.tight_layout()
+# plt.savefig("z500_rmse_rtm_curve.png")
+# plt.close()
 
 plt.figure(figsize=(10,5))
-plt.plot(range(1,39), acc_era5, label='FuXi-ERA5 Init ACC', marker='o')
-plt.plot(range(1,39), acc_gfs, label='FuXi-GFS Init ACC', marker='o')
+plt.plot([int(s) for s in STEPS], acc_era5, label='ERA5 ACC', marker='o')
+plt.plot([int(s) for s in STEPS], acc_naive_gfs, label='Naive_GFS ACC', marker='o')
+plt.plot([int(s) for s in STEPS], acc_trans_gfs, label='Trans_GFS ACC', marker='o')
 plt.xlabel('Forecast Step')
 plt.ylabel('ACC')
-plt.title('ACC vs Forecast Step (z500)')
+plt.title('ACC (z500)')
 plt.legend()
 plt.grid()
 plt.tight_layout()
-plt.savefig("z500_acc_curve.png")
+plt.savefig("z500_acc_rtm_curve.png")
 plt.close()
 
-
-plt.figure(figsize=(10,5))
-plt.plot(times, mean_era5, label='ERA5 Truth', marker='o')
-plt.plot(times, mean_pred_era5, label='FuXi-ERA5 Init', marker='o')
-plt.plot(times, mean_pred_gfs, label='FuXi-GFS Init', marker='o')
-plt.xlabel('Forecast Time')
-plt.ylabel('z500 Mean')
-plt.title('z500 Mean vs Forecast Time')
-plt.legend()
-plt.grid()
-plt.tight_layout()
-plt.savefig("z500_mean_curve.png")
-plt.close()
-
-target_lat = 40.0
-target_lon = 116.0
-
-ds_era5 = xr.open_zarr(ERA5_ROOT)
-lat_arr = ds_era5['lat'].values
-lon_arr = ds_era5['lon'].values
-ds_era5.close()
-
-# 找到最近的索引
-lat_idx = np.argmin(np.abs(lat_arr - target_lat))
-lon_idx = np.argmin(np.abs(lon_arr - target_lon))
-
-z500_true_curve = []
-z500_pred_era5_curve = []
-z500_pred_gfs_curve = []
-
-for i, step in enumerate(STEPS):
-    pred_dir_era5 = os.path.join(PRED_ROOT_ERA5, f"{step}.zarr")
-    pred_dir_gfs = os.path.join(PRED_ROOT_TRANS_GFS, f"{step}.zarr")
-    pred_era5 = get_pred_z500(pred_dir_era5)
-    pred_gfs = get_pred_z500(pred_dir_gfs)
-    true = get_true_z500(times[i])
-    z500_true_curve.append(true[lat_idx, lon_idx])
-    z500_pred_era5_curve.append(pred_era5[lat_idx, lon_idx])
-    z500_pred_gfs_curve.append(pred_gfs[lat_idx, lon_idx])
-
-plt.figure(figsize=(10,5))
-plt.plot(times, z500_true_curve, label='ERA5 Truth', marker='o', color='black')
-plt.plot(times, z500_pred_era5_curve, label='FuXi-ERA5 Init', marker='o', color='blue', linestyle='--')
-plt.plot(times, z500_pred_gfs_curve, label='FuXi-GFS Init', marker='o', color='red', linestyle='-.')
-plt.xlabel('Forecast Time')
-plt.ylabel('z500 at (lat=%.1f, lon=%.1f)' % (lat_arr[lat_idx], lon_arr[lon_idx]))
-plt.title('z500 Prediction Curve at (lat=%.1f, lon=%.1f)' % (lat_arr[lat_idx], lon_arr[lon_idx]))
-plt.legend()
-plt.grid()
-plt.tight_layout()
-plt.savefig("z500_point_curve.png")
-plt.close()
-
-print("已保存单点z500随时间预测曲线：z500_point_curve.png")
-
-print("评估完成，曲线已保存为 z500_rmse_curve.png、z500_acc_curve.png 和 z500_mean_curve.png")
+print("评估完成，曲线已保存为 z500_acc_rtm_curve.png")
