@@ -43,7 +43,7 @@ def main():
         batch_size=8,
         shuffle=False,  
         num_workers=3,  
-        pin_memory=True, 
+        pin_memory=False, 
         drop_last=False,  
     )
 
@@ -78,7 +78,7 @@ def main():
         using_checkpoints = False
     ).to(device)
     
-    num_epochs = 70
+    num_epochs = 140
     
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
@@ -98,8 +98,8 @@ def main():
         optimizer,
         mode='min',
         factor=0.5,
-        patience=7,
-        verbose=True,
+        patience=10,
+        verbose=False,
         min_lr=1e-7,
 
     )
@@ -113,6 +113,7 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-3,
+        tb_dir = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/tensorboard_logs/baseline_2_2",
         save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_2_2",
         save_interval=1,
         use_amp=False,   
@@ -121,7 +122,7 @@ def main():
 
 
     trainer.train(
-        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_59.pth",
+        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_70.pth",
         only_model = True
     )
         #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_59.pth",
