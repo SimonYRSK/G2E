@@ -131,14 +131,14 @@ for i, step in enumerate(STEPS):
     acc_trans_gfs.append(compute_acc(pred_trans_gfs, true, clim))
     acc_naive_gfs.append(compute_acc(pred_naive_gfs, true, clim))
     acc_era5.append(compute_acc(pred_era5, true, clim))
-    print(f"Step {step}:ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Trans GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
+    #print(f"Step {step}:ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Trans GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
 
-    #print(f"Step {step}:ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Naive GFS RMSE={rmse_naive_gfs[-1]:.3f}, ACC={acc_naive_gfs[-1]:.3f} | Trans GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
+    print(f"Step {step}:ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Naive GFS RMSE={rmse_naive_gfs[-1]:.3f}, ACC={acc_naive_gfs[-1]:.3f} | Trans GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
 
 
 plt.figure(figsize=(10,5))
 plt.plot([int(s) for s in STEPS], acc_era5, label='ERA5 ACC', marker='o')
-# plt.plot([int(s) for s in STEPS], acc_naive_gfs, label='Naive_GFS ACC', marker='o')
+plt.plot([int(s) for s in STEPS], acc_naive_gfs, label='Naive_GFS ACC', marker='o')
 plt.plot([int(s) for s in STEPS], acc_trans_gfs, label='Trans_GFS ACC', marker='o')
 plt.xlabel('Forecast Step')
 plt.ylabel('ACC')
@@ -148,5 +148,19 @@ plt.grid()
 plt.tight_layout()
 plt.savefig("z500_acc_rtm_curve.png")
 plt.close()
+
+plt.figure(figsize=(10,5))
+plt.plot([int(s) for s in STEPS], rmse_era5, label='ERA5 RMSE', marker='o')
+plt.plot([int(s) for s in STEPS], rmse_naive_gfs, label='Naive_GFS RMSE', marker='o')
+plt.plot([int(s) for s in STEPS], rmse_trans_gfs, label='Trans_GFS RMSE', marker='o')
+plt.xlabel('Forecast Step')
+plt.ylabel('RMSE')
+plt.title('RMSE (z500)')
+plt.legend()
+plt.grid()
+plt.tight_layout()
+plt.savefig("z500_rmse_rtm_curve.png")
+plt.close()
+
 
 print("评估完成，曲线已保存为 z500_acc_rtm_curve.png")

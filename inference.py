@@ -31,7 +31,7 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
         patch_size=(4, 4),
         in_chans=70,
         embed_dim=1536, 
-        depth = 4, 
+        depth = 8, 
     )
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     print("loaded")
 
     inference(
-        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth",
+        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_29/checkpoint_epoch_15.pth",
         device = "cuda",
         save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline1_28",
         test_loader = test_loader,
