@@ -137,6 +137,7 @@ class G2Esimple(G2E):
             window_size=7,
             depth=0,                
             latent_dim=embed_dim,
+            using_checkpoints = using_checkpoints,
             **kwargs
         )
 

@@ -24,7 +24,11 @@ class BaseTrainer:
         self.best_loss = float('inf')
 
         self.writer = SummaryWriter(
+<<<<<<< HEAD
             log_dir=tb_dir
+=======
+            log_dir="/home/ximutian/tensorboard_logs/1_30"
+>>>>>>> d7e67e2347be13b39856124aaaa9f7f042a2c7ad
         )
         print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
 
@@ -155,6 +159,10 @@ class BaseTrainer:
         for batch_idx, (x, y) in enumerate(pbar):
             x = x.to(self.device)
             y = y.to(self.device)
+            if torch.isnan(x).any() or torch.isinf(x).any():
+                print(f"Batch {batch_idx} input contains nan/inf!")
+            if torch.isnan(y).any() or torch.isinf(y).any():
+                print(f"Batch {batch_idx} target contains nan/inf!")
 
             weights = self.lat_weight(y.shape)
 

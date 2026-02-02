@@ -48,8 +48,8 @@ def main():
     )
 
     val_set = GFS2ERA5Dataset(
-        start="2024-01-01 00:00:00",
-        end="2024-01-03 18:00:00",
+        start="2024-03-15 00:00:00",
+        end="2024-03-18 18:00:00",
     )
     
     val_loader = DataLoader(

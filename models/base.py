@@ -335,6 +335,7 @@ class G2E(nn.Module):
         window_size=9,
         depth = 12,
         latent_dim = 1536,
+        using_checkpoints = True,
         **kwargs
 
     ):
@@ -343,6 +344,7 @@ class G2E(nn.Module):
         self.out_chans = in_chans if out_chans is None else out_chans
         self.patch_size = patch_size
         self.img_size = img_size
+        self.using_checkpoints = using_checkpoints
         input_resolution = int(img_size[0] / patch_size[0]), int(img_size[1] / patch_size[1])
 
         self.patch_emb = PatchEmbedding(img_size, patch_size, in_chans, embed_dim)
@@ -355,20 +357,21 @@ class G2E(nn.Module):
             depth,
             window_size, 
             num_heads,
+            using_checkpoints
         )
         
         self.patch_head = PatchHead(embed_dim, self.out_chans, patch_size)
         
 
     def forward(self, x):
-        if self.training:
+        if self.using_checkpoints:
             x = checkpoint.checkpoint(self.patch_emb, x, use_reentrant=False)
         else:
             x = self.patch_emb(x)
 
         x, mu, log_var = self.mid_layer(x)
 
-        if self.training:
+        if self.using_checkpoints:
             x = checkpoint.checkpoint(self.patch_head, x, use_reentrant=False)
 
         else:
