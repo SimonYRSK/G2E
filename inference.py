@@ -8,6 +8,7 @@ import os
 from data.pairset import TARGET_CHANNELS
 from data.pairset import GFS2ERA5Dataset
 from models.base import G2E
+from models.vanilaVAE import G2Esimple
 from torch.utils.data import DataLoader, DistributedSampler
 import multiprocessing as mp
 import numpy as np
@@ -26,13 +27,14 @@ torch.backends.cudnn.allow_tf32 = True
 
 def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"):
     print("load G2E")
-    model = G2E(
+    model = G2Esimple(
         img_size=(721, 1440),
         patch_size=(4, 4),
         in_chans=70,
-        embed_dim=1536, 
-        depth = 8, 
-    )
+        embed_dim=1024, 
+        num_stages = 1, 
+        using_checkpoints = False
+    ).to(device)
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
@@ -99,8 +101,8 @@ if __name__ == "__main__":
     print("loaded")
 
     inference(
-        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_29/checkpoint_epoch_15.pth",
+        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_51.pth",
         device = "cuda",
-        save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline1_28",
+        save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline1_30",
         test_loader = test_loader,
     )

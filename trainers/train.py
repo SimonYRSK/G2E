@@ -24,11 +24,7 @@ class BaseTrainer:
         self.best_loss = float('inf')
 
         self.writer = SummaryWriter(
-<<<<<<< HEAD
             log_dir=tb_dir
-=======
-            log_dir="/home/ximutian/tensorboard_logs/1_30"
->>>>>>> d7e67e2347be13b39856124aaaa9f7f042a2c7ad
         )
         print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
 
@@ -142,7 +138,6 @@ class BaseTrainer:
             self.writer.add_scalar("Loss/val/total",    avg_loss,  global_step)
             self.writer.add_scalar("Loss/val/recon",    avg_recon, global_step)
             self.writer.add_scalar("Loss/val/kl",       avg_kl,    global_step)
-            self.writer.add_scalar("Loss/val/kl_scaled", avg_kl * self.beta, global_step)
 
         return avg_loss
 

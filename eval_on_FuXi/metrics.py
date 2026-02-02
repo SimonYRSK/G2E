@@ -133,13 +133,13 @@ for i, step in enumerate(STEPS):
     acc_era5.append(compute_acc(pred_era5, true, clim))
     #print(f"Step {step}:ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Trans GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
 
-    print(f"Step {step}:ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Naive GFS RMSE={rmse_naive_gfs[-1]:.3f}, ACC={acc_naive_gfs[-1]:.3f} | Trans GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
+    print(f"Step {step}:Naive ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Naive GFS RMSE={rmse_naive_gfs[-1]:.3f}, ACC={acc_naive_gfs[-1]:.3f} | GFS2ERA5 RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
 
 
 plt.figure(figsize=(10,5))
-plt.plot([int(s) for s in STEPS], acc_era5, label='ERA5 ACC', marker='o')
+plt.plot([int(s) for s in STEPS], acc_era5, label='Naive_ERA5 ACC', marker='o')
 plt.plot([int(s) for s in STEPS], acc_naive_gfs, label='Naive_GFS ACC', marker='o')
-plt.plot([int(s) for s in STEPS], acc_trans_gfs, label='Trans_GFS ACC', marker='o')
+plt.plot([int(s) for s in STEPS], acc_trans_gfs, label='GFS_2_ERA5 ACC', marker='o')
 plt.xlabel('Forecast Step')
 plt.ylabel('ACC')
 plt.title('ACC (z500)')
@@ -150,9 +150,9 @@ plt.savefig("z500_acc_rtm_curve.png")
 plt.close()
 
 plt.figure(figsize=(10,5))
-plt.plot([int(s) for s in STEPS], rmse_era5, label='ERA5 RMSE', marker='o')
+plt.plot([int(s) for s in STEPS], rmse_era5, label='Naive_ERA5 RMSE', marker='o')
 plt.plot([int(s) for s in STEPS], rmse_naive_gfs, label='Naive_GFS RMSE', marker='o')
-plt.plot([int(s) for s in STEPS], rmse_trans_gfs, label='Trans_GFS RMSE', marker='o')
+plt.plot([int(s) for s in STEPS], rmse_trans_gfs, label='GFS_2_ERA5 RMSE', marker='o')
 plt.xlabel('Forecast Step')
 plt.ylabel('RMSE')
 plt.title('RMSE (z500)')
