@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from trainers.train import BaseTrainer
 from models.base import G2E
+from models.vanilaVAE import G2Esimple
 from data.pairset import GFS2ERA5Dataset
 
 import multiprocessing as mp
@@ -34,7 +35,7 @@ def main():
 
     train_set = GFS2ERA5Dataset(
         start="2023-01-01 00:00:00",
-        end="2023-12-31 18:00:00",
+        end="2024-01-01 12:00:00",
     )
 
     dataloader = DataLoader(
@@ -47,8 +48,8 @@ def main():
     )
 
     val_set = GFS2ERA5Dataset(
-        start="2024-05-06 00:00:00",
-        end="2024-05-07 18:00:00",
+        start="2024-01-01 00:00:00",
+        end="2024-01-03 18:00:00",
     )
     
     val_loader = DataLoader(
@@ -60,12 +61,21 @@ def main():
         drop_last=False,  
     )
     
-    model = G2E(
+    # model = G2E(
+    #     img_size=(721, 1440),
+    #     patch_size=(4, 4),
+    #     in_chans=70,
+    #     embed_dim=1536, 
+    #     depth = 8, 
+    # ).to(device)
+
+    model = G2Esimple(
         img_size=(721, 1440),
         patch_size=(4, 4),
         in_chans=70,
-        embed_dim=1536, 
-        depth = 8, 
+        embed_dim=1024, 
+        num_stages = 1, 
+        using_checkpoints = False
     ).to(device)
     
     num_epochs = 70
@@ -74,14 +84,24 @@ def main():
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=5e-4,
+        lr=5e-6,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer,
+    #     T_max=num_epochs,
+    #     eta_min=1e-6,
+    # )
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        T_max=num_epochs,
-        eta_min=1e-6,
+        mode='min',
+        factor=0.5,
+        patience=7,
+        verbose=True,
+        min_lr=1e-7,
+
     )
 
     trainer = BaseTrainer(
@@ -92,16 +112,19 @@ def main():
         scheduler=scheduler,
         epochs=num_epochs,
         device=device,
-        beta=5e-4,
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_29",
+        beta=1e-3,
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_2_2",
         save_interval=1,
         use_amp=False,   
     )
 
 
 
-    trainer.train()
-        #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_28/checkpoint_epoch_14.pth",
+    trainer.train(
+        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_59.pth",
+        only_model = True
+    )
+        #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_59.pth",
         #only_model = True
     
 

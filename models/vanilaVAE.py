@@ -119,7 +119,7 @@ class G2Esimple(G2E):
         patch_size=(4, 4),
         in_chans=70,
         out_chans=None,
-        embed_dim=1536,               # 建議先用較小的 dim 測試
+        embed_dim=1536,               #
         num_groups=32,
         num_stages=2,
         using_checkpoints=True,
@@ -132,10 +132,10 @@ class G2Esimple(G2E):
             out_chans=out_chans,
             embed_dim=embed_dim,
             num_groups=num_groups,
-            num_heads=8,             # 雖然不用但保持接口
+            num_heads=8,             
             num_stages=num_stages,
             window_size=7,
-            depth=0,                 # 無意義
+            depth=0,                
             latent_dim=embed_dim,
             **kwargs
         )

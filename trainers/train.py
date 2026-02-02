@@ -7,7 +7,7 @@ import torch.distributed as dist
 import os
 
 class BaseTrainer:
-    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, epochs, device, beta, 
+    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, epochs, device, beta, tb_dir: str = "./tensorboard_logs",
                  save_dir: str = "./checkpoints", save_interval: int = 1, use_amp: bool = False):
         self.model = model
         self.trainlo = train_loader
@@ -24,7 +24,7 @@ class BaseTrainer:
         self.best_loss = float('inf')
 
         self.writer = SummaryWriter(
-            log_dir="/home/ximutian/tensorboard_logs/1_29"
+            log_dir=tb_dir
         )
         print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
 
@@ -80,7 +80,7 @@ class BaseTrainer:
             torch.save(state, file_path)
             print(f"Checkpoint saved to {file_path}")
 
-            self.writer.add_scalar("best/train_loss", current_avg_loss, epoch)
+            self.writer.add_scalar("best/val_loss", current_avg_loss, epoch)
 
     def load_checkpoint(self, path, strict=True, only_model=False):
         
@@ -192,8 +192,15 @@ class BaseTrainer:
                 self.writer.add_scalar("Loss/batch/total", loss_item, step)
                 self.writer.add_scalar("Loss/batch/recon", recon_item, step)
                 self.writer.add_scalar("Loss/batch/kl",    kl_item,    step)
-        
-        self.sch.step()
+
+
+                
+        val_loss = self.validate_one_epoch(epoch)
+
+        if self.sch is not "ReduceLROnPlateau":
+            self.sch.step()
+        else:
+            self.sch.step(val_loss)
 
         avg_loss = total_loss / len(self.trainlo)
         avg_recon = total_recon_loss / len(self.trainlo)
@@ -207,12 +214,10 @@ class BaseTrainer:
         self.writer.add_scalar("Loss/train/total",    avg_loss,  global_step)
         self.writer.add_scalar("Loss/train/recon",    avg_recon, global_step)
         self.writer.add_scalar("Loss/train/kl",       avg_kl,    global_step)
-        self.writer.add_scalar("Loss/train/kl_scaled", avg_kl * self.beta, global_step)
-        self.writer.add_scalar("hyper/beta",          self.beta,  global_step)
         self.writer.add_scalar("hyper/lr",            self.opt.param_groups[0]['lr'], global_step)
 
 
-        return avg_loss
+        return avg_loss, val_loss
 
 
     def train(self, resume_path=None, only_model = False):
@@ -225,10 +230,10 @@ class BaseTrainer:
         try:
 
             for epoch in range(start_epoch, self.epochs):
-                avg_loss = self.train_one_epoch(epoch)
-                val_loss = self.validate_one_epoch(epoch)
+                avg_loss, val_loss = self.train_one_epoch(epoch)
+                
                 if (epoch + 1) % self.save_interval == 0:
-                    self.save_checkpoint(epoch, avg_loss)
+                    self.save_checkpoint(epoch, val_loss)
 
         finally:
             if hasattr(self, 'writer') and self.writer:
