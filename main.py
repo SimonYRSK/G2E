@@ -35,7 +35,7 @@ def main():
 
     train_set = GFS2ERA5Dataset(
         start="2023-01-01 00:00:00",
-        end="2024-01-01 12:00:00",
+        end="2023-12-31 18:00:00",
     )
 
     dataloader = DataLoader(
@@ -43,7 +43,7 @@ def main():
         batch_size=8,
         shuffle=False,  
         num_workers=3,  
-        pin_memory=False, 
+        pin_memory=True, 
         drop_last=False,  
     )
 
@@ -113,8 +113,8 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-3,
-        tb_dir = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/tensorboard_logs/baseline_2_2",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_2_2",
+        tb_dir = "/home/ximutian/tensorboard_logs/occ",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/occ",
         save_interval=1,
         use_amp=False,   
     )

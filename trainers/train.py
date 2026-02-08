@@ -5,6 +5,8 @@ from pathlib import Path
 from tqdm import tqdm
 import torch.distributed as dist
 import os
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
 
 class BaseTrainer:
     def __init__(self, model, train_loader, val_loader, optimizer, scheduler, epochs, device, beta, tb_dir: str = "./tensorboard_logs",
@@ -200,10 +202,10 @@ class BaseTrainer:
                 
         val_loss = self.validate_one_epoch(epoch)
 
-        if self.sch is not "ReduceLROnPlateau":
-            self.sch.step()
-        else:
+        if isinstance(self.sch, ReduceLROnPlateau):
             self.sch.step(val_loss)
+        else:
+            self.sch.step()
 
         avg_loss = total_loss / len(self.trainlo)
         avg_recon = total_recon_loss / len(self.trainlo)
