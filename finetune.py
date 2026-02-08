@@ -31,7 +31,7 @@ def main():
     print(f"using device: {device}")
 
     set_random_seed(42)
-    baseline = torch.load("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_2_2/checkpoint_epoch_139.pth", map_location="gpu")
+    baseline = torch.load("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_2_2/checkpoint_epoch_139.pth", map_location="cuda")
 
     baseline_state_dict = baseline['model_state_dict']
     
@@ -67,11 +67,9 @@ def main():
         img_size=(721, 1440),
         patch_size=(4, 4),
         in_chans=70,  # 匹配你的
-        embed_dim=1024,  # 匹配
-        num_groups=32,
-        num_stages=1,  # 匹配
-        window_size=7,
-        depth=4,  # 加Swin，从小depth开始
+        embed_dim=1024,  
+        num_stages=1,  
+        depth=2,  # 加Swin，从小depth开始
         using_checkpoints=True
     ).to(device)
 
@@ -100,9 +98,21 @@ def main():
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
 
+    # 进阶：对Swin层单独设置更大的学习率（效果更好）
+    param_groups = [
+        # Swin层：更大的lr
+        {
+            "params": [p for name, p in model.named_parameters() if 'swin' in name and p.requires_grad],
+            "lr": 2e-5
+        },
+        # 其他可训练层：原lr
+        {
+            "params": [p for name, p in model.named_parameters() if 'swin' not in name and p.requires_grad],
+            "lr": 5e-6
+        }
+    ]
     optimizer = torch.optim.Adam(
-        model.parameters(),
-        lr=5e-6,
+        param_groups,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
@@ -127,18 +137,15 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-3,
-        tb_dir = "/home/ximutian/tensorboard_logs/occ",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/occ",
+        tb_dir = "/home/ximutian/tensorboard_logs/f-swin2_8",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_8",
         save_interval=1,
         use_amp=False,   
     )
 
 
 
-    trainer.train(
-        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_70.pth",
-        only_model = True
-    )
+    trainer.train()
 
 
 if __name__ == "__main__":
