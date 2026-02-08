@@ -106,3 +106,6 @@ if __name__ == "__main__":
         save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline2_2",
         test_loader = test_loader,
     )
+
+
+    
