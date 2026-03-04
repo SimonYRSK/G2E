@@ -3,6 +3,7 @@ import random
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from trainers.train import BaseTrainer
+
 from models.base import G2E
 from models.vanilaVAE import G2Esimple
 from data.pairset import GFS2ERA5Dataset
@@ -78,7 +79,7 @@ def main():
         using_checkpoints = False
     ).to(device)
     
-    num_epochs = 140
+    num_epochs = 240
     
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
@@ -115,15 +116,13 @@ def main():
         beta=1e-3,
         tb_dir = "/home/ximutian/tensorboard_logs/occ",
         save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/occ",
-        save_interval=1,
+        save_interval=80,
         use_amp=False,   
     )
 
 
 
     trainer.train(
-        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_8/checkpoint_epoch_125.pth",
-        only_model = False
     )
         #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_70.pth",
         #only_model = True
