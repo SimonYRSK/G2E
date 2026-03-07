@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from tqdm import tqdm
+import pandas as pd
+import numpy as np
 import torch.distributed as dist
 import os
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -114,14 +116,14 @@ class BaseTrainer:
         device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device).split(':')[0]
 
         with torch.no_grad():
-            for x, y, hour, doy in self.vallo:
+            for x, y, i, times in self.vallo:
                 x = x.to(self.device)
                 y = y.to(self.device)
-                hour = hour.to(self.device)
-                doy = doy.to(self.device)
+                i = i.to(self.device)
+                # times = times.to(self.device)
                 weights = self.lat_weight(y.shape)
                 with torch.amp.autocast(device_type=device_type, enabled=self.use_amp):
-                    x_recon, mu, log_var = self.model(x, hour, doy)
+                    x_recon, mu, log_var = self.model(x, i=i, times=times)
                     kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var, weight=weights)
                     loss = kl_loss * self.beta + recon_loss
 
@@ -156,11 +158,11 @@ class BaseTrainer:
 
         device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device).split(':')[0]
 
-        for batch_idx, (x, y, hour, doy) in enumerate(pbar):
+        for batch_idx, (x, y, i, times) in enumerate(pbar):
             x = x.to(self.device)
             y = y.to(self.device)
-            hour = hour.to(self.device)
-            doy = doy.to(self.device)
+            i = i.to(self.device)
+            # times = times.to(self.device)
             if torch.isnan(x).any() or torch.isinf(x).any():
                 print(f"Batch {batch_idx} input contains nan/inf!")
             if torch.isnan(y).any() or torch.isinf(y).any():
@@ -169,9 +171,8 @@ class BaseTrainer:
             weights = self.lat_weight(y.shape)
 
             self.opt.zero_grad(set_to_none=True)
-
             with torch.amp.autocast(device_type=device_type, enabled=self.use_amp):
-                x_recon, mu, log_var = self.model(x, hour, doy)
+                x_recon, mu, log_var = self.model(x, i=i, times=times)
                 kl_loss, recon_loss = self.cal_losses(x_recon, y, mu, log_var, weight=weights)
                 loss = kl_loss * self.beta + recon_loss
 

@@ -6,6 +6,7 @@ from trainers.train import BaseTrainer
 from models.swinVAE import G2E
 from models.vanilaVAE import G2Esimple
 from data.pairset import GFS2ERA5Dataset
+import numpy as np
 
 import multiprocessing as mp
 try:
@@ -26,16 +27,24 @@ def set_random_seed(seed: int):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
+def custom_collate(batch):
+    x, y, i, times = zip(*batch)
+    # times 转成 numpy 数组
+    times = np.array([pd.Timestamp(str(t)) for t in times])
+    return torch.stack(x), torch.stack(y), torch.tensor(i), times
 
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"using device: {device}")
 
     set_random_seed(42)
+    baseline = torch.load("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_14/checkpoint_epoch_210.pth", map_location="cuda")
 
+    baseline_state_dict = baseline['model_state_dict']
+    
     train_set = GFS2ERA5Dataset(
         start="2023-01-01 00:00:00",
-        end="2023-12-31 18:00:00",
+        end="2023-01-01 18:00:00",
     )
 
     dataloader = DataLoader(
@@ -44,7 +53,8 @@ def main():
         shuffle=False,  
         num_workers=3,  
         pin_memory=True, 
-        drop_last=False,  
+        drop_last=False,
+        collate_fn=custom_collate
     )
 
     val_set = GFS2ERA5Dataset(
@@ -59,8 +69,8 @@ def main():
         num_workers=3,  
         pin_memory=True, 
         drop_last=False,  
+        collate_fn=custom_collate
     )
-    
 
     model = G2E(
         img_size=(721, 1440),
@@ -73,12 +83,31 @@ def main():
         using_time_embedding = True,
     ).to(device)
 
-    
+    new_state_dict = model.state_dict()
+
+    for key in new_state_dict.keys():
+        if key in baseline_state_dict and baseline_state_dict[key].shape == new_state_dict[key].shape:
+            new_state_dict[key] = baseline_state_dict[key]
+            print(f"Loaded {key} from baseline.")
+        else:
+            print(f"Skipped {key} due to shape mismatch or missing key.")
+
+    model.load_state_dict(new_state_dict, strict=False)
+
+
+    for name, param in model.named_parameters():
+        # 冻结 patch_emb部分
+        if 'patch_emb' in name:
+            param.requires_grad = False
+        else:
+            param.requires_grad = True
+
+
     num_epochs = 140
     
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
-   
+
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr = 1e-5,
@@ -114,12 +143,8 @@ def main():
 
 
 
-    trainer.train(
-        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_14/checkpoint_epoch_210.pth",
-        only_model = True
-    )
+    trainer.train()
 
-    
 
 if __name__ == "__main__":
     main()

@@ -114,5 +114,5 @@ class GFS2ERA5Dataset(Dataset):
         hour_tensor = torch.tensor(hour, dtype=torch.long)
         doy_tensor = torch.tensor(doy, dtype=torch.long)
 
-        return x_tensor, y_tensor, hour_tensor, doy_tensor
+        return x_tensor, y_tensor, idx, str(current_time)
 

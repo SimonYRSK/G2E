@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint 
+import pandas as pd
+import numpy as np
 from timm.layers.helpers import to_2tuple
 from timm.models.swin_transformer_v2 import SwinTransformerV2Stage
 from einops import rearrange
@@ -321,16 +323,30 @@ class PatchHead(nn.Module):
         return x
   
 class TimeEmbedding(nn.Module):
-    def __init__(self, embed_dim):
+    def __init__(self, freq=6, embed_dim=1536):
         super().__init__()
-        self.hour_embed = nn.Embedding(24, embed_dim)
-        self.doy_embed = nn.Embedding(366, embed_dim)  # 支持闰年
-
-    def forward(self, hour, doy):
-        # hour: [B] int, doy: [B] int
-        hour_emb = self.hour_embed(hour)
-        doy_emb = self.doy_embed(doy)
-        return hour_emb + doy_emb  # [B, embed_dim]
+        self.freq = freq
+        # 映射到主特征维度
+        self.fc = nn.Linear(12, embed_dim)  # 3时刻×2特征×sin/cos=12，1536为embed_dim
+    def forward(self, i, times):
+        # i: torch.Tensor [batch]
+        i = i.cpu().numpy() if isinstance(i, torch.Tensor) else np.array(i)
+        bs = len(i)
+        # times: numpy array of str, convert to pandas.Timestamp
+        times = np.array([pd.Timestamp(t) for t in times])
+        hours = []
+        for t in i:
+            hours.extend([pd.Timedelta(hours=(t-1)*self.freq),
+                        pd.Timedelta(hours=t*self.freq),
+                        pd.Timedelta(hours=(t+1)*self.freq)])
+        times = times[:, None] + np.array(hours).reshape(1, -1)
+        times = [pd.Period(t, 'H') for t in times.reshape(-1)]
+        times = [(p.day_of_year/366, p.hour/24) for p in times]
+        emb = torch.from_numpy(np.array(times, dtype=np.float32))
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
+        emb = emb.reshape(bs, -1)
+        emb = self.fc(emb)
+        return emb
 
 
 class G2E(nn.Module):
@@ -363,8 +379,11 @@ class G2E(nn.Module):
 
         self.patch_emb = PatchEmbedding(img_size, patch_size, in_chans, embed_dim)
 
-        self.time_embedding = TimeEmbedding(embed_dim) if using_time_embedding else None
-        
+        self.time_embedding = TimeEmbedding(embed_dim = embed_dim) if using_time_embedding else None
+        self.fuse_fc = nn.Conv2d(embed_dim * 2, embed_dim, kernel_size=1)
+
+
+
         self.mid_layer = VAE(
             embed_dim,
             num_groups,
@@ -379,27 +398,26 @@ class G2E(nn.Module):
         self.patch_head = PatchHead(embed_dim, self.out_chans, patch_size)
         
 
-    def forward(self, x, hour=None, doy=None):
+    def forward(self, x, i=None, times=None):
         if self.using_checkpoints:
             x_patch = checkpoint.checkpoint(self.patch_emb, x, use_reentrant=False)
         else:
             x_patch = self.patch_emb(x)
 
-        if self.using_time_embedding and hour is not None and doy is not None:
-            time_emb = self.time_embedding(hour, doy)  # [B, embed_dim]
-            # 扩展到空间
+        if self.using_time_embedding and i is not None and times is not None:
+            time_emb = self.time_embedding(i, times)  # [B, embed_dim]
             B, C, H, W = x_patch.shape
             time_emb_expanded = time_emb.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, W)
-            x_patch = x_patch + time_emb_expanded  # 加和，不改变通道数
+            x_patch = torch.cat([x_patch, time_emb_expanded], dim=1)  # [B, 2*embed_dim, H, W]
+            x_patch = self.fuse_fc(x_patch)  # [B, embed_dim, H, W]
 
         x, mu, log_var = self.mid_layer(x_patch)
 
         if self.using_checkpoints:
             x = checkpoint.checkpoint(self.patch_head, x, use_reentrant=False)
-
         else:
             x = self.patch_head(x)
-        
+
         x = F.interpolate(x, size=self.img_size, mode='bilinear', align_corners=False)
         return x, mu, log_var
 
