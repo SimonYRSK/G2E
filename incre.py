@@ -83,21 +83,10 @@ def main():
     
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
-    # 进阶：对Swin层单独设置更大的学习率（效果更好）
-    param_groups = [
-        # Swin层：更大的lr
-        {
-            "params": [p for name, p in model.named_parameters() if 'swin' in name and p.requires_grad],
-            "lr": 2e-5
-        },
-        # 其他可训练层：原lr
-        {
-            "params": [p for name, p in model.named_parameters() if 'swin' not in name and p.requires_grad],
-            "lr": 5e-6
-        }
-    ]
+   
     optimizer = torch.optim.Adam(
-        param_groups,
+        model.parameters(),
+        lr = 2e-6,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
@@ -132,7 +121,7 @@ def main():
 
     trainer.train(
         resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_8/checkpoint_epoch_125.pth",
-        only_model = False
+        only_model = True
     )
         #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_70.pth",
         #only_model = True
