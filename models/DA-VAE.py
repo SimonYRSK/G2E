@@ -1,4 +1,4 @@
-from .base import *
+from .swinVAE import *
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint as checkpoint

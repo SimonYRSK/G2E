@@ -17,6 +17,7 @@ class BaseTrainer:
         self.opt = optimizer
         self.sch = scheduler
         self.epochs = epochs
+        self.start_epoch = 0
         self.device = device
         self.beta = beta
         self.save_dir = save_dir
@@ -71,9 +72,9 @@ class BaseTrainer:
         improve = current_avg_loss < self.best_loss
         if improve:
             self.best_loss = current_avg_loss
-            file_path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch+1}.pth")
+            file_path = os.path.join(self.save_dir, f"checkpoint_epoch_{epoch + 1 + self.start_epoch}.pth")
             state = {
-                'epoch': epoch + 1,
+                'epoch': epoch + 1 + self.start_epoch,
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.opt.state_dict(),
                 'scheduler_state_dict': self.sch.state_dict() if self.sch else None,
@@ -82,7 +83,7 @@ class BaseTrainer:
             torch.save(state, file_path)
             print(f"Checkpoint saved to {file_path}")
 
-            self.writer.add_scalar("best/val_loss", current_avg_loss, epoch)
+            self.writer.add_scalar("best/val_loss", current_avg_loss,  epoch + self.start_epoch)
 
     def load_checkpoint(self, path, strict=True, only_model=False):
         
@@ -100,8 +101,8 @@ class BaseTrainer:
             if 'scaler_state_dict' in checkpoint and self.scaler:
                 self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             
-        start_epoch = checkpoint.get('epoch', 0)
-        return start_epoch, None
+        self.start_epoch = checkpoint.get('epoch', 0)  # 记录断点
+        return self.start_epoch, None
 
     def validate_one_epoch(self, epoch):
         self.model.eval()
@@ -234,11 +235,11 @@ class BaseTrainer:
         best_metric = None
         
         if resume_path is not None:
-            start_epoch, best_metric = self.load_checkpoint(resume_path, strict=True, only_model = only_model)
+            start_epoch, best_metric = self.load_checkpoint(resume_path, strict=False, only_model = only_model)
 
         try:
 
-            for epoch in range(start_epoch, self.epochs):
+            for epoch in range(0, self.epochs):
                 avg_loss, val_loss = self.train_one_epoch(epoch)
                 
                 if (epoch + 1) % self.save_interval == 0:

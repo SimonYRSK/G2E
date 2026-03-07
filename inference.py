@@ -7,7 +7,7 @@ import torch.distributed as dist
 import os
 from data.pairset import TARGET_CHANNELS
 from data.pairset import GFS2ERA5Dataset
-from models.base import G2E
+from models.swinVAE import G2E
 from models.vanilaVAE import G2Esimple
 from torch.utils.data import DataLoader, DistributedSampler
 import multiprocessing as mp
