@@ -35,7 +35,7 @@ def main():
 
     train_set = GFS2ERA5Dataset(
         start="2023-01-01 00:00:00",
-        end="2023-12-31 18:00:00",
+        end="2023-01-01 18:00:00",
     )
 
     dataloader = DataLoader(
@@ -69,7 +69,8 @@ def main():
         embed_dim=1024,  
         num_stages=1,  
         depth=2,  # 加Swin，从小depth开始
-        using_checkpoints=True
+        using_checkpoints=True,
+        using_time_embedding = True,
     ).to(device)
 
     # for name, param in model.named_parameters():
@@ -111,8 +112,8 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-3,
-        tb_dir = "/home/ximutian/tensorboard_logs/f-swin2_14",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_14",
+        tb_dir = "/home/ximutian/tensorboard_logs/f-swin3_7",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin3_7",
         save_interval=1,
         use_amp=False,   
     )
@@ -120,7 +121,7 @@ def main():
 
 
     trainer.train(
-        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_8/checkpoint_epoch_125.pth",
+        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_14/checkpoint_epoch_210.pth",
         only_model = True
     )
         #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_70.pth",
