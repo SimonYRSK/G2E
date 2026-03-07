@@ -7,7 +7,7 @@ from models.swinVAE import G2E
 from models.vanilaVAE import G2Esimple
 from data.pairset import GFS2ERA5Dataset
 import numpy as np
-
+import pandas as pd
 import multiprocessing as mp
 try:
     mp.set_start_method('spawn', force=True)
@@ -44,7 +44,7 @@ def main():
     
     train_set = GFS2ERA5Dataset(
         start="2023-01-01 00:00:00",
-        end="2023-01-01 18:00:00",
+        end="2023-12-31 18:00:00",
     )
 
     dataloader = DataLoader(
@@ -110,7 +110,7 @@ def main():
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr = 1e-5,
+        lr = 2e-5,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )

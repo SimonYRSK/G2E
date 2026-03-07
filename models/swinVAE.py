@@ -330,21 +330,20 @@ class TimeEmbedding(nn.Module):
         self.fc = nn.Linear(12, embed_dim)  # 3时刻×2特征×sin/cos=12，1536为embed_dim
     def forward(self, i, times):
         # i: torch.Tensor [batch]
-        i = i.cpu().numpy() if isinstance(i, torch.Tensor) else np.array(i)
+        if isinstance(i, torch.Tensor):
+            i = i.cpu().numpy()
         bs = len(i)
-        # times: numpy array of str, convert to pandas.Timestamp
-        times = np.array([pd.Timestamp(t) for t in times])
-        hours = []
-        for t in i:
-            hours.extend([pd.Timedelta(hours=(t-1)*self.freq),
-                        pd.Timedelta(hours=t*self.freq),
-                        pd.Timedelta(hours=(t+1)*self.freq)])
-        times = times[:, None] + np.array(hours).reshape(1, -1)
-        times = [pd.Period(t, 'H') for t in times.reshape(-1)]
-        times = [(p.day_of_year/366, p.hour/24) for p in times]
-        emb = torch.from_numpy(np.array(times, dtype=np.float32))
-        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
-        emb = emb.reshape(bs, -1)
+        times = np.array([pd.Timestamp(str(t)) for t in times])
+        features = []
+        for idx in range(bs):
+            for t_offset in [i[idx]-1, i[idx], i[idx]+1]:
+                t = times[idx] + pd.Timedelta(hours=t_offset*self.freq)
+                p = pd.Period(t, 'H')
+                features.append((p.day_of_year/366, p.hour/24))
+        emb = torch.from_numpy(np.array(features, dtype=np.float32))
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)  # [bs*3, 4]
+        emb = emb.reshape(bs, -1)  # [bs, 12]
+        emb = emb.to(self.fc.weight.device)
         emb = self.fc(emb)
         return emb
 
