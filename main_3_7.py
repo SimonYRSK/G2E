@@ -110,7 +110,7 @@ def main():
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr = 2e-5,
+        lr = 1e-5,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
@@ -122,7 +122,7 @@ def main():
         factor=0.5,
         patience=10,
         verbose=False,
-        min_lr=1e-7,
+        min_lr=5e-7,
 
     )
 
