@@ -106,5 +106,13 @@ class GFS2ERA5Dataset(Dataset):
         x_tensor = torch.from_numpy(x_np)
         y_tensor = torch.from_numpy(y_np)
 
-        return x_tensor, y_tensor
+        # hour: 0~23
+        hour = current_time.hour
+        # day of year: 1~366
+        doy = current_time.dayofyear
+
+        hour_tensor = torch.tensor(hour, dtype=torch.long)
+        doy_tensor = torch.tensor(doy, dtype=torch.long)
+
+        return x_tensor, y_tensor, hour_tensor, doy_tensor
 

@@ -320,6 +320,18 @@ class PatchHead(nn.Module):
         
         return x
   
+class TimeEmbedding(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.hour_embed = nn.Embedding(24, embed_dim)
+        self.doy_embed = nn.Embedding(366, embed_dim)  # 支持闰年
+
+    def forward(self, hour, doy):
+        # hour: [B] int, doy: [B] int
+        hour_emb = self.hour_embed(hour)
+        doy_emb = self.doy_embed(doy)
+        return hour_emb + doy_emb  # [B, embed_dim]
+
 
 class G2E(nn.Module):
     def __init__(
@@ -336,6 +348,7 @@ class G2E(nn.Module):
         depth = 12,
         latent_dim = 1536,
         using_checkpoints = True,
+        using_time_embedding = False,
         **kwargs
 
     ):
@@ -345,9 +358,12 @@ class G2E(nn.Module):
         self.patch_size = patch_size
         self.img_size = img_size
         self.using_checkpoints = using_checkpoints
+        self.using_time_embedding = using_time_embedding
         input_resolution = int(img_size[0] / patch_size[0]), int(img_size[1] / patch_size[1])
 
         self.patch_emb = PatchEmbedding(img_size, patch_size, in_chans, embed_dim)
+
+        self.time_embedding = TimeEmbedding(embed_dim) if using_time_embedding else None
         
         self.mid_layer = VAE(
             embed_dim,
@@ -363,13 +379,20 @@ class G2E(nn.Module):
         self.patch_head = PatchHead(embed_dim, self.out_chans, patch_size)
         
 
-    def forward(self, x):
+    def forward(self, x, hour=None, doy=None):
         if self.using_checkpoints:
             x = checkpoint.checkpoint(self.patch_emb, x, use_reentrant=False)
         else:
             x = self.patch_emb(x)
 
-        x, mu, log_var = self.mid_layer(x)
+        if self.using_time_embedding and hour is not None and doy is not None:
+            time_emb = self.time_embedding(hour, doy)  # [B, embed_dim]
+            # 扩展到空间
+            B, C, H, W = x_patch.shape
+            time_emb_expanded = time_emb.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, H, W)
+            x_patch = x_patch + time_emb_expanded  # 加和，不改变通道数
+
+        x, mu, log_var = self.mid_layer(x_patch)
 
         if self.using_checkpoints:
             x = checkpoint.checkpoint(self.patch_head, x, use_reentrant=False)
