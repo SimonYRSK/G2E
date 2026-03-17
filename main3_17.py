@@ -8,7 +8,7 @@ from data.pairset import GFS2ERA5Dataset
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
-
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 try:
     mp.set_start_method('spawn', force=True)
 except RuntimeError:
@@ -48,7 +48,7 @@ def main():
 
     train_loader = DataLoader(
         train_set,
-        batch_size=8,
+        batch_size=4,
         shuffle=False,
         num_workers=3,
         pin_memory=True,
@@ -57,13 +57,13 @@ def main():
     )
 
     val_set = GFS2ERA5Dataset(
-        start="2024-03-15 00:00:00",
-        end="2024-03-18 18:00:00",
+        start="2024-01-01 12:00:00",
+        end="2024-01-03 18:00:00",
     )
 
     val_loader = DataLoader(
         val_set,
-        batch_size=8,
+        batch_size=4,
         shuffle=False,
         num_workers=3,
         pin_memory=True,
@@ -76,36 +76,60 @@ def main():
         patch_size=(4, 4),
         in_chans=70,
         out_chans=70,
-        embed_dim=1024,
+        embed_dim=384,              # 可写可不写，给 channels 时主要看 channels
         num_groups=32,
         num_heads=8,
         num_stages=3,
         window_size=9,
-        depth=6,
+        depth=[0, 1, 1],
         using_checkpoints=True,
         using_time_embedding=True,
-        res_per_stage=[1, 2, 4],
+        res_per_stage=[1, 1, 1],
+        channels=[384, 768, 1536],  
     ).to(device)
 
-    num_epochs = 200
+
+    num_epochs = 300
 
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-6,
+        lr=1e-4,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    warmup_epochs = 5
+    min_lr = 5e-7
+
+    warmup_scheduler = LinearLR(
         optimizer,
-        mode='min',
-        factor=0.5,
-        patience=10,
-        verbose=False,
-        min_lr=5e-7,
+        start_factor=0.1,          # 第一个 epoch 用 0.1 * base_lr
+        end_factor=1.0,            # warmup 结束时回到 base_lr
+        total_iters=warmup_epochs,
     )
+
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=num_epochs - warmup_epochs,  # 余弦覆盖剩余的 epoch
+        eta_min=min_lr,
+    )
+
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs],
+    )
+
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer,
+    #     mode='min',
+    #     factor=0.5,
+    #     patience=7,
+    #     verbose=False,
+    #     min_lr=5e-7,
+    # )
 
     trainer = UNetTrainer(
         model=model,
@@ -116,8 +140,8 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=0.0,
-        tb_dir="./tensorboard_logs/unet3_17",
-        save_dir="./checkpoints/unet3_17",
+        tb_dir = "/home/ximutian/tensorboard_logs/swinunet3_17",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet3_17",
         save_interval=1,
         use_amp=False,
     )

@@ -199,6 +199,7 @@ class UNetEncoder(nn.Module):
         num_heads,
         using_checkpoints: bool = True,
         res_per_stage=None,
+        dims=None,
     ):
         super().__init__()
         self.num_stages = num_stages
@@ -213,6 +214,16 @@ class UNetEncoder(nn.Module):
             w_i = int(base_w // (2 ** i))
             self.stage_resolutions.append((h_i, w_i))
 
+        # 每个 stage 的通道数配置：
+        # - 若 dims 为 None，则所有 stage 使用相同的 dim
+        # - 若提供 list/tuple，则长度必须等于 num_stages
+        if dims is None:
+            dims = [dim] * num_stages
+        else:
+            assert len(dims) == num_stages, "len(dims) 必须等于 num_stages"
+            dims = list(dims)
+        self.dims = dims
+
         # 每个 stage 的 ResBlock 数量
         if res_per_stage is None:
             res_per_stage = [1] * num_stages
@@ -222,8 +233,15 @@ class UNetEncoder(nn.Module):
             assert len(res_per_stage) == num_stages, "len(res_per_stage) 必须等于 num_stages"
         self.res_per_stage = res_per_stage
 
-        # 将总 depth 均分到各个 Swin stage，至少为 1
-        depth_per_stage = max(1, swin_depth // max(1, num_stages))
+        # Swin depth 配置：
+        # - 若传入 int，则均分到各个 stage，且每个 stage 至少 1 层
+        # - 若传入 list/tuple，则逐 stage 指定，可为 0 表示该 stage 不使用 Swin
+        if isinstance(swin_depth, int):
+            depth_per_stage = [max(1, swin_depth // max(1, num_stages))] * num_stages
+        else:
+            assert len(swin_depth) == num_stages, "len(swin_depth) 必须等于 num_stages"
+            depth_per_stage = list(swin_depth)
+        self.depth_per_stage = depth_per_stage
 
         # 每个 stage 一组 ResBlock
         self.res_blocks = nn.ModuleList()  # List[ModuleList[ResBlock]]
@@ -231,33 +249,40 @@ class UNetEncoder(nn.Module):
         self.down_blocks = nn.ModuleList()
 
         for i in range(num_stages):
+            ch = self.dims[i]
             stage_res_blocks = nn.ModuleList(
-                [ResBlock(num_groups, dim) for _ in range(self.res_per_stage[i])]
+                [ResBlock(num_groups, ch) for _ in range(self.res_per_stage[i])]
             )
             self.res_blocks.append(stage_res_blocks)
 
             input_reso = self.stage_resolutions[i]
-            swin = SwinTransformerV2Stage(
-                dim=dim,
-                out_dim=dim,
-                window_size=window_size,
-                depth=depth_per_stage,
-                output_nchw=True,
-                input_resolution=input_reso,
-                num_heads=num_heads,
-            )
-            if using_checkpoints:
-                swin.grad_checkpointing = True
+            d_i = self.depth_per_stage[i]
+            if d_i > 0:
+                swin = SwinTransformerV2Stage(
+                    dim=ch,
+                    out_dim=ch,
+                    window_size=window_size,
+                    depth=d_i,
+                    output_nchw=True,
+                    input_resolution=input_reso,
+                    num_heads=num_heads,
+                )
+                if using_checkpoints:
+                    swin.grad_checkpointing = True
+            else:
+                # depth 为 0 时，该 stage 不使用 Swin，直接用恒等映射占位
+                swin = nn.Identity()
             self.swin_stages.append(swin)
 
             # 最后一层不再下采样
             if i < num_stages - 1:
-                self.down_blocks.append(Downblock(dim, dim))
+                self.down_blocks.append(Downblock(self.dims[i], self.dims[i + 1]))
 
     def forward(self, x):
         skips = []
         h = x
         for i in range(self.num_stages):
+            ch = self.dims[i]
             # 当前 stage 内的若干个 ResBlock 串联
             for rb in self.res_blocks[i]:
                 if self.using_checkpoints:
@@ -284,7 +309,7 @@ class UNetEncoder(nn.Module):
 class UNetDecoder(nn.Module):
     """UNet 解码端：逐级上采样并与 encoder skip 拼接，再经 CNN。"""
 
-    def __init__(self, dim, num_groups, num_stages, output_reso, using_checkpoints: bool = True):
+    def __init__(self, dim, num_groups, num_stages, output_reso, using_checkpoints: bool = True, dims=None):
         super().__init__()
         self.num_stages = num_stages
         self.using_checkpoints = using_checkpoints
@@ -296,25 +321,47 @@ class UNetDecoder(nn.Module):
             w_i = int(base_w // (2 ** i))
             self.stage_resolutions.append((h_i, w_i))
 
+        # 与 Encoder 保持一致的每个 stage 通道数
+        if dims is None:
+            dims = [dim] * num_stages
+        else:
+            assert len(dims) == num_stages, "len(dims) 必须等于 num_stages"
+            dims = list(dims)
+        self.dims = dims
+
         # 上采样层数 = 下采样层数 = num_stages - 1
         self.up_blocks = nn.ModuleList()
+        # 先用一个 reduce block 将 concat 后的 2*dim 通道压回 dim，再用 ResBlock(dim)
+        self.reduce_blocks = nn.ModuleList()
         self.res_blocks = nn.ModuleList()
 
         for idx in range(num_stages - 1):
             # 从分辨率 stage i+1 上采样到 stage i
             i = num_stages - 2 - idx  # 反向遍历：先从最小尺度往上
             out_size = self.stage_resolutions[i]
-            self.up_blocks.append(Upblock(dim, dim, out_size))
-            # 拼接 skip 后通道数为 2*dim
-            self.res_blocks.append(ResBlock(num_groups, dim * 2))
+            in_ch = self.dims[i + 1]
+            out_ch = self.dims[i]
+            self.up_blocks.append(Upblock(in_ch, out_ch, out_size))
+
+            # concat 之后通道数为 2*dim，先用一个 Conv+GN+SiLU 压回 dim 通道
+            self.reduce_blocks.append(
+                nn.Sequential(
+                    nn.Conv2d(out_ch * 2, out_ch, kernel_size=3, padding=1),
+                    nn.GroupNorm(num_groups, out_ch),
+                    nn.SiLU(),
+                )
+            )
+            # 再接一个 ResBlock(dim)
+            self.res_blocks.append(ResBlock(num_groups, out_ch))
 
     def forward(self, x, skips):
         # skips: 长度 num_stages，其中最后一个是 bottleneck 尺度
         h = x
-        for idx, (up, res) in enumerate(zip(self.up_blocks, self.res_blocks)):
+        for idx, (up, reduce, res) in enumerate(zip(self.up_blocks, self.reduce_blocks, self.res_blocks)):
             i = self.num_stages - 2 - idx
             h = up(h)
-            h = torch.cat([h, skips[i]], dim=1)
+            h = torch.cat([h, skips[i]], dim=1)  # [B, 2*dim, H, W]
+            h = reduce(h)  # [B, dim, H, W]
             if self.using_checkpoints:
                 h = checkpoint.checkpoint(res, h, use_reentrant=False)
             else:
@@ -340,10 +387,18 @@ class UNet(nn.Module):
         num_heads,
         using_checkpoints: bool = True,
         res_per_stage=None,
+        dims=None,
         **kwargs,
     ):
         super().__init__()
         window_size = to_2tuple(window_size)
+
+        # dims 为每个 stage 的通道列表；若未提供，则所有 stage 使用相同的 dim
+        if dims is None:
+            dims = [dim] * num_stages
+        else:
+            assert len(dims) == num_stages, "len(dims) 必须等于 num_stages"
+            dims = list(dims)
 
         self.encoder = UNetEncoder(
             dim,
@@ -355,6 +410,7 @@ class UNet(nn.Module):
             num_heads,
             using_checkpoints=using_checkpoints,
             res_per_stage=res_per_stage,
+            dims=dims,
         )
 
         self.decoder = UNetDecoder(
@@ -363,6 +419,7 @@ class UNet(nn.Module):
             num_stages,
             output_reso,
             using_checkpoints=using_checkpoints,
+            dims=dims,
         )
 
     def forward(self, x):
@@ -419,6 +476,7 @@ class G2E(nn.Module):
         using_checkpoints = True,
         using_time_embedding = False,
         res_per_stage = [1, 2, 4],
+        channels=None,
         **kwargs
 
     ):
@@ -433,12 +491,24 @@ class G2E(nn.Module):
         self.time_channels = 4 if using_time_embedding else 0
         input_resolution = int(img_size[0] / patch_size[0]), int(img_size[1] / patch_size[1])
 
+        # 每个 stage 的通道列表：
+        # - 若 channels 为 None，则所有 stage 使用相同的 embed_dim
+        # - 若提供 list/tuple（长度 = num_stages），则：
+        #     channels[0] 为 patch 后的通道数，channels[1] 为第一个 Downblock 后通道数，依此类推
+        if channels is None:
+            dims = [embed_dim] * num_stages
+        else:
+            assert len(channels) == num_stages, "len(channels) 必须等于 num_stages"
+            dims = list(channels)
+        self.dims = dims
+
         # Patch 之前就将时间特征拼到像素通道，故这里的 in_chans 需要加上 time_channels
-        self.patch_emb = PatchEmbedding(img_size, patch_size, in_chans + self.time_channels, embed_dim)
+        # PatchEmbedding 输出通道使用第一个 stage 的通道数 dims[0]
+        self.patch_emb = PatchEmbedding(img_size, patch_size, in_chans + self.time_channels, self.dims[0])
 
         # 中间层改为 UNet（非 VAE）
         self.mid_layer = UNet(
-            embed_dim,
+            self.dims[0],
             num_groups,
             num_stages,
             input_resolution,
@@ -447,9 +517,11 @@ class G2E(nn.Module):
             num_heads,
             using_checkpoints,
             res_per_stage,
+            dims=self.dims,
         )
         
-        self.patch_head = PatchHead(embed_dim, self.out_chans, patch_size)
+        # PatchHead 的输入通道与最高分辨率的通道数相同
+        self.patch_head = PatchHead(self.dims[0], self.out_chans, patch_size)
         
 
     def forward(self, x, times=None, i=None):  # 时间嵌入在输入第一步完成
