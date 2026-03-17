@@ -39,11 +39,12 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
     model = G2E(
         img_size=(721, 1440),
         patch_size=(4, 4),
-        in_chans=70,
-        embed_dim=1024,      # 与 incre.py 保持一致
-        num_stages=1,
-        depth=2,             # 与 incre.py 保持一致
-        using_checkpoints=True
+        in_chans=70,  # 匹配你的
+        embed_dim=1024,  
+        num_stages=1,  
+        depth=2,  # 加Swin，从小depth开始
+        using_checkpoints=True,
+        using_time_embedding = True,
     ).to(device)
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -59,9 +60,25 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
     preds = []
     print("inferencing...")
     with torch.no_grad():
-        for batch_idx, (x, _) in enumerate(pbar):
+        for batch_idx, batch in enumerate(pbar):
+            # 兼容 dataset 返回 (x,y) 或 (x,y,i,times)
+            if isinstance(batch, (list, tuple)) and len(batch) == 4:
+                x, _, i, times = batch
+            elif isinstance(batch, (list, tuple)) and len(batch) == 2:
+                x, _ = batch
+                i, times = None, None
+            else:
+                raise ValueError(f"Unexpected batch format: type={type(batch)}, len={len(batch) if hasattr(batch, '__len__') else 'N/A'}")
+
             x = x.to(device)
-            out, _, _ = model(x)
+            if i is not None and torch.is_tensor(i):
+                i = i.to(device)
+
+            # 有时间输入就传，没有就走原始分支
+            if i is not None and times is not None:
+                out, _, _ = model(x, i=i, times=times)
+            else:
+                out, _, _ = model(x)
             preds.append(out.cpu().numpy())
     arr = np.concatenate(preds, axis=0)
     print("saving as zarr")
@@ -111,9 +128,9 @@ if __name__ == "__main__":
     print("loaded")
 
     inference(
-        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_14/checkpoint_epoch_210.pth",
+        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/t-swin3_7/checkpoint_epoch_140.pth",
         device = "cuda",
-        save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/f-swin2_14",
+        save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/t-swin3_7",
         test_loader = test_loader,
     )
 

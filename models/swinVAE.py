@@ -397,7 +397,7 @@ class G2E(nn.Module):
         self.patch_head = PatchHead(embed_dim, self.out_chans, patch_size)
         
 
-    def forward(self, x, i=None, times=None):
+    def forward(self, x, i=None, times=None): #像素空间concat到一起
         if self.using_checkpoints:
             x_patch = checkpoint.checkpoint(self.patch_emb, x, use_reentrant=False)
         else:

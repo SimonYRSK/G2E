@@ -1,14 +1,14 @@
 import os
 import random
 import torch
-from torch.utils.data import DataLoader, DistributedSampler
-from trainers.train import BaseTrainer
-
-from models.base import G2E
-from models.vanilaVAE import G2Esimple
+from torch.utils.data import DataLoader
+from trainers.trainUNET import BaseTrainer
+from models.swinUNET import G2E
 from data.pairset import GFS2ERA5Dataset
-
+import numpy as np
+import pandas as pd
 import multiprocessing as mp
+
 try:
     mp.set_start_method('spawn', force=True)
 except RuntimeError:
@@ -28,6 +28,13 @@ def set_random_seed(seed: int):
     torch.backends.cudnn.benchmark = True
 
 
+def custom_collate(batch):
+    x, y, i, times = zip(*batch)
+    # times 保持为 pandas.Timestamp 数组，模型内部会转字符串再做时间特征
+    times = np.array([pd.Timestamp(str(t)) for t in times])
+    return torch.stack(x), torch.stack(y), torch.tensor(i), times
+
+
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"using device: {device}")
@@ -35,65 +42,61 @@ def main():
     set_random_seed(42)
 
     train_set = GFS2ERA5Dataset(
-        start="2023-01-01 00:00:00",
+        start="2023-10-01 00:00:00",
         end="2023-12-31 18:00:00",
     )
 
-    dataloader = DataLoader(
+    train_loader = DataLoader(
         train_set,
         batch_size=8,
-        shuffle=False,  
-        num_workers=3,  
-        pin_memory=True, 
-        drop_last=False,  
+        shuffle=False,
+        num_workers=3,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=custom_collate,
     )
 
     val_set = GFS2ERA5Dataset(
         start="2024-03-15 00:00:00",
         end="2024-03-18 18:00:00",
     )
-    
+
     val_loader = DataLoader(
         val_set,
         batch_size=8,
-        shuffle=False,  
-        num_workers=3,  
-        pin_memory=True, 
-        drop_last=False,  
+        shuffle=False,
+        num_workers=3,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=custom_collate,
     )
-    
-    # model = G2E(
-    #     img_size=(721, 1440),
-    #     patch_size=(4, 4),
-    #     in_chans=70,
-    #     embed_dim=1536, 
-    #     depth = 8, 
-    # ).to(device)
 
-    model = G2Esimple(
+    model = G2E(
         img_size=(721, 1440),
         patch_size=(4, 4),
         in_chans=70,
-        embed_dim=1024, 
-        num_stages = 1, 
-        using_checkpoints = False
+        out_chans=70,
+        embed_dim=1024,
+        num_groups=32,
+        num_heads=8,
+        num_stages=3,
+        window_size=9,
+        depth=6,
+        using_checkpoints=True,
+        using_time_embedding=True,
+        res_per_stage=[1, 2, 4],
     ).to(device)
-    
-    num_epochs = 240
-    
+
+    num_epochs = 200
+
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=5e-6,
+        lr=1e-6,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-    #     optimizer,
-    #     T_max=num_epochs,
-    #     eta_min=1e-6,
-    # )
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -101,33 +104,29 @@ def main():
         factor=0.5,
         patience=10,
         verbose=False,
-        min_lr=1e-7,
-
+        min_lr=5e-7,
     )
 
     trainer = BaseTrainer(
         model=model,
-        train_loader=dataloader,
+        train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
         scheduler=scheduler,
         epochs=num_epochs,
         device=device,
-        beta=1e-3,
-        tb_dir = "/home/ximutian/tensorboard_logs/occ",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/occ",
-        save_interval=80,
-        use_amp=False,   
+        beta=0.0,
+        tb_dir="./tensorboard_logs/unet3_17",
+        save_dir="./checkpoints/unet3_17",
+        save_interval=1,
+        use_amp=False,
     )
-
-
 
     trainer.train(
+        resume_path=None,
+        only_model=False,
     )
-        #resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_1_30/checkpoint_epoch_70.pth",
-        #only_model = True
-    
+
 
 if __name__ == "__main__":
     main()
-#export LD_LIBRARY_PATH=/home/ximutian/miniconda3/envs/xuyue/lib:$LD_LIBRARY_PATH

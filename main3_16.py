@@ -3,10 +3,11 @@ import random
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from trainers.train import BaseTrainer
-from models.base import G2E
+from models.swinVAE import G2E
 from models.vanilaVAE import G2Esimple
 from data.pairset import GFS2ERA5Dataset
-
+import numpy as np
+import pandas as pd
 import multiprocessing as mp
 try:
     mp.set_start_method('spawn', force=True)
@@ -26,14 +27,17 @@ def set_random_seed(seed: int):
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
 
+def custom_collate(batch):
+    x, y, i, times = zip(*batch)
+    # times 转成 numpy 数组
+    times = np.array([pd.Timestamp(str(t)) for t in times])
+    return torch.stack(x), torch.stack(y), torch.tensor(i), times
+
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"using device: {device}")
 
     set_random_seed(42)
-    baseline = torch.load("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/baseline_2_2/checkpoint_epoch_139.pth", map_location="cuda")
-
-    baseline_state_dict = baseline['model_state_dict']
     
     train_set = GFS2ERA5Dataset(
         start="2023-01-01 00:00:00",
@@ -46,7 +50,8 @@ def main():
         shuffle=False,  
         num_workers=3,  
         pin_memory=True, 
-        drop_last=False,  
+        drop_last=False,
+        collate_fn=custom_collate
     )
 
     val_set = GFS2ERA5Dataset(
@@ -61,6 +66,7 @@ def main():
         num_workers=3,  
         pin_memory=True, 
         drop_last=False,  
+        collate_fn=custom_collate
     )
 
     model = G2E(
@@ -70,49 +76,22 @@ def main():
         embed_dim=1024,  
         num_stages=1,  
         depth=2,  # 加Swin，从小depth开始
-        using_checkpoints=True
+        using_checkpoints=True,
+        using_time_embedding = True,
     ).to(device)
 
-    new_state_dict = model.state_dict()
-
-    for key in new_state_dict.keys():
-        if key in baseline_state_dict and baseline_state_dict[key].shape == new_state_dict[key].shape:
-            new_state_dict[key] = baseline_state_dict[key]
-            print(f"Loaded {key} from baseline.")
-        else:
-            print(f"Skipped {key} due to shape mismatch or missing key.")
-
-    model.load_state_dict(new_state_dict, strict=False)
 
 
-    for name, param in model.named_parameters():
-        # 冻结 patch_emb 和 encoder 的非 swin 部分
-        if 'patch_emb' in name or ('mid_layer.encoder' in name and 'swin' not in name):
-            param.requires_grad = False
-        else:
-            param.requires_grad = True
 
 
-    num_epochs = 210
+    num_epochs = 280
     
     print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M")
 
 
-    # 进阶：对Swin层单独设置更大的学习率（效果更好）
-    param_groups = [
-        # Swin层：更大的lr
-        {
-            "params": [p for name, p in model.named_parameters() if 'swin' in name and p.requires_grad],
-            "lr": 2e-5
-        },
-        # 其他可训练层：原lr
-        {
-            "params": [p for name, p in model.named_parameters() if 'swin' not in name and p.requires_grad],
-            "lr": 5e-6
-        }
-    ]
     optimizer = torch.optim.Adam(
-        param_groups,
+        model.parameters(),
+        lr = 1e-6,
         weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
@@ -124,7 +103,7 @@ def main():
         factor=0.5,
         patience=10,
         verbose=False,
-        min_lr=1e-7,
+        min_lr=5e-7,
 
     )
 
@@ -137,8 +116,8 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-3,
-        tb_dir = "/home/ximutian/tensorboard_logs/f-swin2_14",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_14",
+        tb_dir = "/home/ximutian/tensorboard_logs/t-van3_16",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/t-van3_16",
         save_interval=1,
         use_amp=False,   
     )
@@ -146,7 +125,7 @@ def main():
 
 
     trainer.train(
-        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/f-swin2_8/checkpoint_epoch_125.pth",
+        resume_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/t-van3_9/checkpoint_epoch_158.pth",
         only_model = False
     )
 
