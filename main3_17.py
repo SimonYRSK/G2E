@@ -2,7 +2,7 @@ import os
 import random
 import torch
 from torch.utils.data import DataLoader
-from trainers.trainUNET import BaseTrainer
+from trainers.trainUNET import UNetTrainer
 from models.swinUNET import G2E
 from data.pairset import GFS2ERA5Dataset
 import numpy as np
@@ -107,7 +107,7 @@ def main():
         min_lr=5e-7,
     )
 
-    trainer = BaseTrainer(
+    trainer = UNetTrainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,

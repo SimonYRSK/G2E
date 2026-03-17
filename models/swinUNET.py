@@ -62,13 +62,15 @@ def get_pad2d(input_resolution, window_size):
     return padding[: 4]
 
 
-def time_to_features(timestamp: str, height: int, width: int) -> np.ndarray:
+def time_to_features(timestamp, height: int, width: int) -> np.ndarray:
     """将单个时间戳编码为 4 个时间特征通道，并 broadcast 到 (H, W)。
 
-    month/day 的正余弦编码，格式参照用户提供的示例函数。
+    支持多种常见格式，例如 "YYYY-MM-DD HH:MM:SS"、"YYYY-MM-DDTHH:MM:SS" 等，
+    内部统一用 pandas.Timestamp 解析。
     返回形状为 (4, H, W) 的 numpy 数组，dtype=float32。
     """
-    dt = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
+    # 统一转成字符串再交给 pandas 解析，更健壮
+    dt = pd.Timestamp(str(timestamp))
     month = dt.month
     day = dt.day
     hour = dt.hour  # 目前未使用，但保留以便后续扩展
