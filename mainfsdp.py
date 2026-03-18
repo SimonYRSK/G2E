@@ -75,14 +75,21 @@ def main():
 
     set_random_seed(42)
 
+    # 1) 训练集：使用 2021-2023 全部数据
     train_set = GFS2ERA5Dataset(
-        start="2023-01-01 00:00:00",
+        start="2021-01-01 00:00:00",
         end="2023-12-31 18:00:00",
+        # max_samples_per_year 可在调参时设成一个较小的数，例如 500 或 1000，快速训练
+        # 正式训练时设为 None 即可使用全量数据
+        max_samples_per_year=None,
     )
 
+    # 2) 验证集：从 2024 年每个月随机抽取 2 天的全部时间步
     val_set = GFS2ERA5Dataset(
-        start="2024-03-15 00:00:00",
-        end="2024-03-18 18:00:00",
+        start="2024-01-01 00:00:00",
+        end="2024-12-31 18:00:00",
+        val_sample_per_month=2,
+        val_sample_year=2024,
     )
 
     train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True)

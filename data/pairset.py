@@ -33,15 +33,32 @@ TARGET_CHANNELS = [
     "msl", "tp"
 ]
 
-START_TIME = "2022-10-01 00:00:00"
-END_TIME = "2023-12-31 18:00:00"
+START_TIME = "2021-01-01 00:00:00"
+END_TIME = "2024-12-31 18:00:00"
 
 ERA5_PATH = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/datasets/era5.rtm.02_25.6h.c109.new3/"
 GFS_PATH = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"
 
+BAD_TIMES = {
+    pd.Timestamp("202401010000"),
+    pd.Timestamp("202501010000"),
+}
 
 class GFS2ERA5Dataset(Dataset):
-    def __init__(self, target_channels = None, start: str = None, end: str = None, x_path: str = None, y_path: str = None):
+    def __init__(
+        self,
+        target_channels=None,
+        start: str | None = None,
+        end: str | None = None,
+        x_path: str | None = None,
+        y_path: str | None = None,
+        # 验证集：指定年份，每个月随机抽取若干“整天”的所有时间步
+        val_sample_per_month: int | None = None,
+        val_sample_year: int | None = None,
+        # 训练集：每个年份最多保留多少个时间步，用于快速调参
+        max_samples_per_year: int | None = None,
+        sample_seed: int = 42,
+    ):
         self.x_path = GFS_PATH if x_path is None else x_path
         self.y_path = ERA5_PATH if y_path is None else y_path
         self.target_channels = TARGET_CHANNELS if target_channels is None else target_channels
@@ -49,6 +66,11 @@ class GFS2ERA5Dataset(Dataset):
 
         self.start_time = pd.to_datetime(START_TIME if start is None else start)
         self.end_time = pd.to_datetime(END_TIME if end is None else end)
+
+        self.val_sample_per_month = val_sample_per_month
+        self.val_sample_year = val_sample_year
+        self.max_samples_per_year = max_samples_per_year
+        self.sample_seed = int(sample_seed)
 
 
         self.ds_x = xr.open_zarr(self.x_path)
@@ -61,7 +83,56 @@ class GFS2ERA5Dataset(Dataset):
         y_times_in_range = y_times[(y_times >= self.start_time) & (y_times <= self.end_time)]
 
         common_times = x_times_in_range.intersection(y_times_in_range)
-        self.time_list = common_times.tolist()  
+        
+        # 过滤掉坏时间步
+        if BAD_TIMES:
+            mask = ~common_times.isin(BAD_TIMES)
+            common_times = common_times[mask]
+
+        # 若为验证集：在指定年份内，每个月随机抽取若干“整天”的所有时间步
+        if self.val_sample_per_month is not None and self.val_sample_year is not None:
+            rng = np.random.default_rng(self.sample_seed)
+            times_year = common_times[common_times.year == self.val_sample_year]
+
+            selected_ts: list[pd.Timestamp] = []
+            for month in range(1, 13):
+                month_times = times_year[times_year.month == month]
+                if len(month_times) == 0:
+                    continue
+
+                # 按“天”去重，随机选若干天，再保留这些天里的全部时间步
+                days = month_times.normalize().unique()
+                if len(days) == 0:
+                    continue
+
+                k = min(self.val_sample_per_month, len(days))
+                chosen_days = rng.choice(days, size=k, replace=False)
+
+                for d in chosen_days:
+                    mask_d = month_times.normalize() == d
+                    selected_ts.extend(month_times[mask_d].tolist())
+
+            if selected_ts:
+                common_times = pd.DatetimeIndex(sorted(selected_ts))
+
+        # 若为训练集快速调参：每个年份最多保留若干时间步
+        if self.max_samples_per_year is not None and self.max_samples_per_year > 0:
+            rng = np.random.default_rng(self.sample_seed)
+            selected_ts: list[pd.Timestamp] = []
+
+            for year in sorted(common_times.year.unique()):
+                year_times = common_times[common_times.year == year]
+                n = len(year_times)
+                if n <= self.max_samples_per_year:
+                    selected_ts.extend(year_times.tolist())
+                else:
+                    idx = rng.choice(n, size=self.max_samples_per_year, replace=False)
+                    selected_ts.extend(year_times.sort_values().to_series().iloc[idx].tolist())
+
+            if selected_ts:
+                common_times = pd.DatetimeIndex(sorted(selected_ts))
+
+        self.time_list = common_times.tolist()
 
 
         self.align_ch()
