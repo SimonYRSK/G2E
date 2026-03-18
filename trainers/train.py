@@ -8,11 +8,25 @@ import numpy as np
 import torch.distributed as dist
 import os
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import matplotlib.pyplot as plt
+from PIL import Image
+
+# 兼容新版 Pillow 移除 Image.ANTIALIAS 的情况
+if not hasattr(Image, "ANTIALIAS"):
+    if hasattr(Image, "Resampling"):
+        Image.ANTIALIAS = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+    else:
+        Image.ANTIALIAS = Image.LANCZOS  # type: ignore[attr-defined]
 
 
 class BaseTrainer:
-    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, epochs, device, beta, tb_dir: str = "./tensorboard_logs",
-                 save_dir: str = "./checkpoints", save_interval: int = 1, use_amp: bool = False):
+    def __init__(self, model, train_loader, val_loader, optimizer, scheduler, epochs, device, beta,
+                 tb_dir: str = "./tensorboard_logs",
+                 save_dir: str = "./checkpoints",
+                 save_interval: int = 1,
+                 use_amp: bool = False,
+                 kl_anneal: bool = False,
+                 kl_anneal_epochs: int = 10):
         self.model = model
         self.trainlo = train_loader
         self.vallo = val_loader
@@ -21,12 +35,22 @@ class BaseTrainer:
         self.epochs = epochs
         self.start_epoch = 0
         self.device = device
+        # KL 权重（beta）：默认固定，也可配合 KL annealing 动态调节
         self.beta = beta
+        self.beta_target = beta
         self.save_dir = save_dir
         self.save_interval = save_interval
         self.use_amp = use_amp
         self.scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
         self.best_loss = float('inf')
+
+        # KL annealing 配置（仅当上层 Trainer/模型实际使用 KL 时才会生效）
+        self.kl_anneal = kl_anneal
+        self.kl_anneal_epochs = max(1, int(kl_anneal_epochs))
+
+        # 记录每个 epoch 的 train/val loss，用于绘图
+        self.train_loss_history = []
+        self.val_loss_history = []
 
         self.writer = SummaryWriter(
             log_dir=tb_dir
@@ -34,6 +58,50 @@ class BaseTrainer:
         print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
 
         os.makedirs(self.save_dir, exist_ok=True)
+
+
+    def _plot_and_log_loss_curves(self, epoch: int):
+        """绘制 train / val loss 曲线，保存到文件并写入 TensorBoard。
+
+        每个 epoch 调用一次，覆盖同名图片文件。
+        在分布式/FSDP 场景下，如存在 self.is_master，则只在 rank==0 执行。
+        """
+
+        # 分布式场景下，只在主进程绘图/写文件
+        if hasattr(self, "is_master") and not getattr(self, "is_master"):
+            return
+
+        if len(self.train_loss_history) == 0:
+            return
+
+        epochs = list(range(1, len(self.train_loss_history) + 1))
+
+        plt.switch_backend("Agg")
+        fig, ax = plt.subplots(figsize=(6, 4))
+
+        ax.plot(epochs, self.train_loss_history, label="train_loss", color="tab:blue")
+        if len(self.val_loss_history) == len(self.train_loss_history):
+            ax.plot(epochs, self.val_loss_history, label="val_loss", color="tab:orange")
+
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("Train / Val Loss")
+        ax.grid(True, linestyle="--", alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+
+        # 覆盖保存到同一个文件
+        img_path = os.path.join(self.save_dir, "loss_curve.png")
+        fig.savefig(img_path)
+
+        # 写入 TensorBoard（捕获可能的图像写入异常，避免训练中断）
+        if hasattr(self, "writer") and self.writer is not None:
+            try:
+                self.writer.add_figure("Loss/curve", fig, global_step=epoch)
+            except Exception as e:
+                print(f"[Warning] Failed to write loss figure to TensorBoard: {e}")
+
+        plt.close(fig)
 
 
     def lat_weight(self, shape):
@@ -241,7 +309,21 @@ class BaseTrainer:
         try:
 
             for epoch in range(0, self.epochs):
+                # 在每个 epoch 开始前根据 KL annealing 调整当前 beta
+                if self.kl_anneal and self.beta_target > 0.0:
+                    # 仅当上层 Trainer/模型真的在用 KL 时才有意义
+                    if getattr(self, "using_kl", True):
+                        if epoch < self.kl_anneal_epochs:
+                            self.beta = self.beta_target * float(epoch + 1) / float(self.kl_anneal_epochs)
+                        else:
+                            self.beta = self.beta_target
+
                 avg_loss, val_loss = self.train_one_epoch(epoch)
+
+                # 记录损失历史并绘制曲线
+                self.train_loss_history.append(avg_loss)
+                self.val_loss_history.append(val_loss)
+                self._plot_and_log_loss_curves(epoch)
                 
                 if (epoch + 1) % self.save_interval == 0:
                     self.save_checkpoint(epoch, val_loss)

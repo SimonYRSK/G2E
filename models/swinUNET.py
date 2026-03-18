@@ -370,10 +370,12 @@ class UNetDecoder(nn.Module):
 
 
 class UNet(nn.Module):
-    """基于 PatchEmbedding 的单个 Swin-UNet（非 VAE）。
+    """基于 PatchEmbedding 的单个 Swin-UNet，可选瓶颈 VAE（KL 重参数化）。
 
     Patch 之后进入多尺度 Encoder：每个 stage CNN + Swin + Down，
-    bottleneck 之后通过 Decoder 逐级上采样并融合 skip。
+    若 using_kl=False：bottleneck 直接送入 Decoder；
+    若 using_kl=True：在 bottleneck 处学习 (mu, log_var)，重参数化得到 z 再送 Decoder，
+    并返回 (out, mu, log_var)。
     """
 
     def __init__(
@@ -388,10 +390,13 @@ class UNet(nn.Module):
         using_checkpoints: bool = True,
         res_per_stage=None,
         dims=None,
+        using_kl: bool = False,
         **kwargs,
     ):
         super().__init__()
         window_size = to_2tuple(window_size)
+
+        self.using_kl = using_kl
 
         # dims 为每个 stage 的通道列表；若未提供，则所有 stage 使用相同的 dim
         if dims is None:
@@ -422,10 +427,26 @@ class UNet(nn.Module):
             dims=dims,
         )
 
+        # 瓶颈 VAE 的 mu / log_var 头，只在 using_kl 时创建
+        if self.using_kl:
+            bottleneck_ch = dims[-1]
+            self.mu_head = nn.Conv2d(bottleneck_ch, bottleneck_ch, kernel_size=3, padding=1)
+            self.logvar_head = nn.Conv2d(bottleneck_ch, bottleneck_ch, kernel_size=3, padding=1)
+
     def forward(self, x):
         bottleneck, skips = self.encoder(x)
-        out = self.decoder(bottleneck, skips)
-        return out
+
+        if self.using_kl:
+            mu = self.mu_head(bottleneck)
+            log_var = self.logvar_head(bottleneck)
+            std = torch.exp(0.5 * log_var)
+            eps = torch.randn_like(std)
+            z = mu + eps * std
+            out = self.decoder(z, skips)
+            return out, mu, log_var
+        else:
+            out = self.decoder(bottleneck, skips)
+            return out
     
 
 
@@ -477,6 +498,7 @@ class G2E(nn.Module):
         using_time_embedding = False,
         res_per_stage = [1, 2, 4],
         channels=None,
+        using_kl: bool = False,
         **kwargs
 
     ):
@@ -487,6 +509,7 @@ class G2E(nn.Module):
         self.img_size = img_size
         self.using_checkpoints = using_checkpoints
         self.using_time_embedding = using_time_embedding
+        self.using_kl = using_kl
         # 若使用时间嵌入，则在输入通道上多拼接 4 个时间特征通道
         self.time_channels = 4 if using_time_embedding else 0
         input_resolution = int(img_size[0] / patch_size[0]), int(img_size[1] / patch_size[1])
@@ -506,7 +529,7 @@ class G2E(nn.Module):
         # PatchEmbedding 输出通道使用第一个 stage 的通道数 dims[0]
         self.patch_emb = PatchEmbedding(img_size, patch_size, in_chans + self.time_channels, self.dims[0])
 
-        # 中间层改为 UNet（非 VAE）
+        # 中间层改为 UNet，可选 VAE 瓶颈
         self.mid_layer = UNet(
             self.dims[0],
             num_groups,
@@ -518,6 +541,7 @@ class G2E(nn.Module):
             using_checkpoints,
             res_per_stage,
             dims=self.dims,
+            using_kl=self.using_kl,
         )
         
         # PatchHead 的输入通道与最高分辨率的通道数相同
@@ -537,75 +561,22 @@ class G2E(nn.Module):
         else:
             x_patch = self.patch_emb(x)
 
-        # UNet 中间层，不再是 VAE，没有采样与 KL 项
-        x = self.mid_layer(x_patch)
+        # UNet 中间层，可选瓶颈 VAE
+        if self.using_kl:
+            mid_out, mu, log_var = self.mid_layer(x_patch)
+        else:
+            mid_out = self.mid_layer(x_patch)
 
         if self.using_checkpoints:
-            x = checkpoint.checkpoint(self.patch_head, x, use_reentrant=False)
+            x = checkpoint.checkpoint(self.patch_head, mid_out, use_reentrant=False)
         else:
-            x = self.patch_head(x)
+            x = self.patch_head(mid_out)
 
         x = F.interpolate(x, size=self.img_size, mode='bilinear', align_corners=False)
-        return x
+        if self.using_kl:
+            return x, mu, log_var
+        else:
+            return x
 
 # 测试代码
 
-# 测试代码
-if __name__ == "__main__":
-    device = "cuda"
-    print(f"using: {device}")
-    
-    # 打印初始显存
-    print(f"Initial GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-    
-    x = torch.randn(13, 10, 721, 1440).to(device)
-    target = torch.randn(13, 10, 721, 1440).to(device)  # 目标数据
-    
-    print(f"After data load GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-    
-    model = G2E(
-        img_size=(721, 1440),
-        patch_size=(4, 4),
-        in_chans=10,
-        embed_dim=1536,  
-    ).to(device)
-    
-    print(f"After model load GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-    
-    # ========== 训练逻辑 ==========
-    model.train()  # 切换到训练模式（checkpoint 只在 train 模式生效）
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    criterion = nn.MSELoss()
-    from torch.cuda.amp import autocast, GradScaler
-    scaler = torch.cuda.amp.GradScaler()
-    num_epochs = 3
-    
-    for epoch in range(num_epochs):
-        optimizer.zero_grad(set_to_none=True)
-        print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
-        print(f"Before forward GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
-
-        with torch.cuda.amp.autocast():
-            out = model(x)
-            loss = criterion(out, target)
-
-        print(f"After forward GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB, loss={loss.item():.6f}")
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        # 清理与统计
-        torch.cuda.synchronize()
-        print(f"After step GPU memory: {torch.cuda.memory_allocated()/1024**3:.2f} GB")
-        print(f"Peak GPU memory: {torch.cuda.max_memory_allocated()/1024**3:.2f} GB")
-
-        # 清理缓存并重置 peak 统计（有助于下一 epoch 内存分配）
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-    
-    print("\n========== Training completed ==========")
-    print(f"Final GPU memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-    print(f"Peak GPU memory: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
