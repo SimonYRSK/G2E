@@ -1,19 +1,13 @@
 import torch
-import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
-from pathlib import Path
 from tqdm import tqdm
-import torch.distributed as dist
 import os
-from data.pairset import TARGET_CHANNELS
-from data.pairset import GFS2ERA5Dataset
-from models.swinVAE import G2E
-from models.vanilaVAE import G2Esimple
-from torch.utils.data import DataLoader, DistributedSampler
+from data.pairset import TARGET_CHANNELS, GFS2ERA5Dataset
+from models.swinUNET import G2E
+
+from torch.utils.data import DataLoader
 import multiprocessing as mp
 import numpy as np
 import xarray as xr
-import zarr
 import pandas as pd
 
 try:
@@ -27,25 +21,25 @@ torch.backends.cudnn.allow_tf32 = True
 
 def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized"):
     print("load G2E")
-    # model = G2Esimple(
-    #     img_size=(721, 1440),
-    #     patch_size=(4, 4),
-    #     in_chans=70,
-    #     embed_dim=1024, 
-    #     num_stages = 1, 
-    #     using_checkpoints = False
-    # ).to(device)
 
+    # 与训练 mainfsdp.py 中一致的 SwinUNet 配置
     model = G2E(
         img_size=(721, 1440),
         patch_size=(4, 4),
-        in_chans=70,  # 匹配你的
-        embed_dim=1024,  
-        num_stages=1,  
-        depth=2,  # 加Swin，从小depth开始
+        in_chans=70,
+        out_chans=70,
+        embed_dim=384,
+        num_groups=32,
+        num_heads=8,
+        num_stages=3,
+        window_size=9,
+        depth=[0, 1, 1],
         using_checkpoints=True,
-        using_time_embedding = True,
-    ).to(device)
+        using_time_embedding=True,
+        res_per_stage=[1, 1, 1],
+        channels=[384, 768, 1536],
+        using_kl=True,
+    )
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
 
@@ -55,12 +49,24 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
     print("model loaded")
 
     model.eval()
-    pbar = tqdm(test_loader)
+    
+    # ========== 关键调试：先检查DataLoader的样本数 ==========
+    dataset_size = len(test_loader.dataset)
+    batch_size = test_loader.batch_size
+    print(f"📊 数据集样本总数: {dataset_size}, 批次大小: {batch_size}, 预计批次数: {np.ceil(dataset_size / batch_size)}")
+    
+    if dataset_size == 0:
+        raise ValueError("❌ 测试数据集为空！请检查GFS2ERA5Dataset的时间范围和数据路径是否正确")
+    
+    pbar = tqdm(test_loader, desc="推理进度")
     
     preds = []
     print("inferencing...")
     with torch.no_grad():
         for batch_idx, batch in enumerate(pbar):
+            # 打印当前批次信息，确认循环在执行
+            pbar.set_postfix({"批次": batch_idx + 1})
+            
             # 兼容 dataset 返回 (x,y) 或 (x,y,i,times)
             if isinstance(batch, (list, tuple)) and len(batch) == 4:
                 x, _, i, times = batch
@@ -71,19 +77,36 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
                 raise ValueError(f"Unexpected batch format: type={type(batch)}, len={len(batch) if hasattr(batch, '__len__') else 'N/A'}")
 
             x = x.to(device)
-            if i is not None and torch.is_tensor(i):
-                i = i.to(device)
-
-            # 有时间输入就传，没有就走原始分支
-            if i is not None and times is not None:
-                out, _, _ = model(x, i=i, times=times)
+            # 当前 SwinUNet 仅使用时间特征，不再使用 i
+            if times is not None:
+                out = model(x, times=times)
             else:
-                out, _, _ = model(x)
-            preds.append(out.cpu().numpy())
+                out = model(x)
+
+            # using_kl=True 时，前向返回 (x_recon, mu, log_var)
+            if isinstance(out, (tuple, list)):
+                out = out[0]
+            
+            # ========== 检查输出是否有效 ==========
+            if out is None:
+                print(f"⚠️ 第 {batch_idx+1} 批次模型输出为空，跳过")
+                continue
+            
+            # 将结果添加到列表
+            pred_np = out.detach().cpu().numpy()
+            preds.append(pred_np)
+            print(f"✅ 第 {batch_idx+1} 批次推理完成，输出形状: {pred_np.shape}")
+    
+    # ========== 鲁棒性检查：确保preds非空 ==========
+    if len(preds) == 0:
+        raise ValueError("❌ 推理完成后preds列表为空！没有任何有效推理结果")
+    
+    # 拼接所有批次的结果
     arr = np.concatenate(preds, axis=0)
+    print(f"📈 拼接后总结果形状: {arr.shape}")
+    
     print("saving as zarr")
     ds_gfs = xr.open_zarr(gfs_path)
-
 
     time_list = test_loader.dataset.time_list
     ds_gfs_sel = ds_gfs.sel(time=pd.to_datetime(time_list))
@@ -108,31 +131,39 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
         import shutil
         shutil.rmtree(save_path)
     new_ds.to_zarr(save_path, consolidated=True)
-    print(f"推理结果已保存为zarr: {save_path}")
+    print(f"✅ 推理结果已保存为zarr: {save_path}")
 
 if __name__ == "__main__":
 
+    # 使用 2025-03-15 一整天 (00, 06, 12, 18) 作为推理时间段，来自 2025 标准化 GFS
     test_set = GFS2ERA5Dataset(
-        start = "2024-01-01 00:00:00",
-        end = "2024-01-01 18:00:00"
+        start="2025-03-15 00:00:00",
+        end="2025-03-15 18:00:00",
+        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized",
     )
+    
+    # ========== 调试：检查数据集是否加载成功 ==========
+    print(f"🔍 测试数据集长度: {len(test_set)}")
+    if len(test_set) == 0:
+        print("❌ 警告：test_set 为空！请检查：")
+        print("   1. 时间范围 2025-03-15 是否在gfs_2025_c70_normalized数据中")
+        print("   2. x_path 路径是否正确，文件是否存在")
+        print("   3. GFS2ERA5Dataset 的时间解析逻辑是否正确")
 
     test_loader = DataLoader(
         test_set,
-        batch_size=8,
-        shuffle=False,  
-        num_workers=3,  
-        pin_memory=True, 
-        drop_last=False,  
+        batch_size=4,
+        shuffle=False,
+        num_workers=3,
+        pin_memory=True,
+        drop_last=False,
     )
-    print("loaded")
+    print("loaded test set for 2025-03-15")
 
     inference(
-        checkpoint_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/t-swin3_7/checkpoint_epoch_140.pth",
-        device = "cuda",
-        save_path = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/t-swin3_7",
-        test_loader = test_loader,
+        checkpoint_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_fsdp_2022_2024_3_19/checkpoint_epoch_100.pth",
+        device="cuda",
+        save_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/swinunet_fsdp_2022_2024_3_19_20250315",
+        test_loader=test_loader,
+        gfs_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized",
     )
-
-
-    

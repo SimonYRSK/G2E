@@ -168,6 +168,7 @@ class FSDPUNetTrainer(UNetTrainer):
         total_loss = 0.0
         total_recon_loss = 0.0
         total_kl_loss = 0.0
+        num_batches = 0
 
         # DistributedSampler 设 epoch，保证每轮 shuffle 不同
         sampler = getattr(self.trainlo, "sampler", None)
@@ -184,12 +185,14 @@ class FSDPUNetTrainer(UNetTrainer):
             x = x.to(self.device)
             y = y.to(self.device)
             # i: lead time index，这里不再参与模型计算
-            if torch.isnan(x).any() or torch.isinf(x).any():
+            has_nan_inf_x = torch.isnan(x).any() or torch.isinf(x).any()
+            has_nan_inf_y = torch.isnan(y).any() or torch.isinf(y).any()
+            if has_nan_inf_x or has_nan_inf_y:
                 if self.is_master:
-                    print(f"Batch {batch_idx} input contains nan/inf!")
-            if torch.isnan(y).any() or torch.isinf(y).any():
-                if self.is_master:
-                    print(f"Batch {batch_idx} target contains nan/inf!")
+                    times_str = ", ".join(str(t) for t in list(times))
+                    print(f"[Train] batch {batch_idx} contains NaN/Inf, times: {times_str}")
+                    print("[Train] 该 batch 已跳过，用于避免训练权重被 NaN 污染")
+                continue
 
             weights = self.lat_weight(y.shape)
 
@@ -210,6 +213,14 @@ class FSDPUNetTrainer(UNetTrainer):
                     kl_loss = torch.tensor(0.0, device=self.device)
                     loss = recon_loss
 
+            # 如果 loss 本身出现 NaN/Inf，同样跳过该 batch，避免反向传播污染参数
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                if self.is_master:
+                    times_str = ", ".join(str(t) for t in list(times))
+                    print(f"[Train] batch {batch_idx} loss is NaN/Inf, times: {times_str}")
+                    print("[Train] 该 batch 的梯度已跳过，请检查数据或数值稳定性")
+                continue
+
             loss_item = float(loss.detach())
             recon_item = float(recon_loss.detach())
             kl_item = float(kl_loss.detach())
@@ -217,6 +228,7 @@ class FSDPUNetTrainer(UNetTrainer):
             total_loss += loss_item
             total_recon_loss += recon_item
             total_kl_loss += kl_item
+            num_batches += 1
 
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.opt)
@@ -251,7 +263,13 @@ class FSDPUNetTrainer(UNetTrainer):
                         self.writer.add_scalar("Loss/batch/kl", kl_item, step)
 
         # 得到全局平均 train loss（这里只 all_reduce 总损失和重建损失，KL 已体现在总损失中）
-        avg_loss, avg_recon = self._all_reduce_loss(total_loss, total_recon_loss, len(self.trainlo))
+        if num_batches == 0:
+            if self.is_master:
+                print("[Train] 本 epoch 所有 batch 均因 NaN/Inf 被跳过，返回损失 0.0")
+            avg_loss = 0.0
+            avg_recon = 0.0
+        else:
+            avg_loss, avg_recon = self._all_reduce_loss(total_loss, total_recon_loss, num_batches)
 
         # 验证也返回全局损失
         val_loss = self.validate_one_epoch(epoch)
