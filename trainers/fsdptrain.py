@@ -107,9 +107,20 @@ class FSDPUNetTrainer(UNetTrainer):
         device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device).split(":")[0]
 
         with torch.no_grad():
-            for x, y, i, times in self.vallo:
+            for batch_idx, (x, y, i, times) in enumerate(self.vallo):
                 x = x.to(self.device)
                 y = y.to(self.device)
+
+                # 检查验证集 batch 是否存在 NaN/Inf，并打印对应时间
+                has_nan_inf_x = torch.isnan(x).any() or torch.isinf(x).any()
+                has_nan_inf_y = torch.isnan(y).any() or torch.isinf(y).any()
+                if has_nan_inf_x or has_nan_inf_y:
+                    if self.is_master:
+                        times_str = ", ".join(str(t) for t in list(times))
+                        print(f"[Val] batch {batch_idx} contains NaN/Inf, times: {times_str}")
+                        print("[Val] 该 batch 已跳过，用于避免验证损失变为 NaN")
+                    continue
+
                 # i: lead time index，这里不再参与模型计算
                 weights = self.lat_weight(y.shape)
                 with torch.amp.autocast(device_type=device_type, enabled=self.use_amp):
@@ -131,7 +142,14 @@ class FSDPUNetTrainer(UNetTrainer):
                 total_recon_loss += float(recon_loss.detach())
                 num_batches += 1
 
-        avg_loss, avg_recon = self._all_reduce_loss(total_loss, total_recon_loss, num_batches)
+        # 若全部 batch 都被跳过，避免除以 0
+        if num_batches == 0:
+            if self.is_master:
+                print("[Val] 所有 batch 均因包含 NaN/Inf 被跳过，返回损失 0.0 以保持训练继续进行")
+            avg_loss = 0.0
+            avg_recon = 0.0
+        else:
+            avg_loss, avg_recon = self._all_reduce_loss(total_loss, total_recon_loss, num_batches)
 
         if self.is_master:
             print(f"\nEpoch {epoch+1} 验证集平均:")

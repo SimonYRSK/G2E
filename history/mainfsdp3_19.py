@@ -84,7 +84,7 @@ def main():
         x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized",
         # max_samples_per_year 可在调参时设成一个较小的数，例如 500 或 1000，快速训练
         # 正式训练时设为 None 即可使用全量数据
-        max_samples_per_year=None,
+        max_samples_per_year=500,
         sample_seed = data_sample_seed,
     )
 
@@ -134,7 +134,7 @@ def main():
         num_heads=8,
         num_stages=3,
         window_size=9,
-        depth=[0, 0, 1],
+        depth=[0, 0, 0],
         using_checkpoints=True,
         using_time_embedding=True,
         res_per_stage=[1, 1, 1],
@@ -150,16 +150,16 @@ def main():
     # 用 FSDP 包裹模型
     model = FSDP(base_model, device_id=device)
 
-    num_epochs = 300
+    num_epochs = 120
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=1e-4,
+        lr=8e-5,
         weight_decay=2e-5,
         betas=(0.9, 0.999),
     )
 
-    warmup_epochs = 15
+    warmup_epochs = 3
     min_lr = 5e-7
 
     warmup_scheduler = LinearLR(
@@ -190,8 +190,8 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-4,  # KL 目标权重，如未使用 KL 可设为 0
-        tb_dir="/home/ximutian/tensorboard_logs/swinunet_2022_2024_3_21",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_2022_2024_3_21",
+        tb_dir="/home/ximutian/tensorboard_logs/unet_fsdp_train_on_2022_2024_3_19",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/unet_fsdp_train_on_2022_2024_3_19",
         save_interval=1,
         use_amp=True,
         rank=rank,

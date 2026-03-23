@@ -75,27 +75,21 @@ def main():
 
     set_random_seed(42)
 
-    data_sample_seed = 43
-
-    # 1) 训练集：使用 2022-2024，全量样本，来自 2020-2024 标准化 GFS Zarr
+    # 1) 训练集：使用 2021-2023 全部数据
     train_set = GFS2ERA5Dataset(
-        start="2022-01-01 00:00:00",
-        end="2024-12-31 18:00:00",
-        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized",
+        start="2021-01-01 00:00:00",
+        end="2023-12-31 18:00:00",
         # max_samples_per_year 可在调参时设成一个较小的数，例如 500 或 1000，快速训练
         # 正式训练时设为 None 即可使用全量数据
-        max_samples_per_year=None,
-        sample_seed = data_sample_seed,
+        max_samples_per_year=500,
     )
 
-    # 2) 验证集：使用 2025 年数据，按原逻辑在 2025 年每个月随机抽取若干“整天”的所有时间步
+    # 2) 验证集：从 2024 年每个月随机抽取 2 天的全部时间步
     val_set = GFS2ERA5Dataset(
-        start="2025-01-01 00:00:00",
-        end="2025-11-20 18:00:00",
-        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized",
+        start="2024-01-01 00:00:00",
+        end="2024-12-31 18:00:00",
         val_sample_per_month=1,
-        val_sample_year=2025,
-        sample_seed = data_sample_seed,
+        val_sample_year=2024,
     )
 
     train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True)
@@ -103,7 +97,7 @@ def main():
 
     train_loader = DataLoader(
         train_set,
-        batch_size=8,
+        batch_size=4,
         shuffle=False,
         sampler=train_sampler,
         num_workers=3,
@@ -114,7 +108,7 @@ def main():
 
     val_loader = DataLoader(
         val_set,
-        batch_size=8,
+        batch_size=4,
         shuffle=False,
         sampler=val_sampler,
         num_workers=3,
@@ -134,12 +128,12 @@ def main():
         num_heads=8,
         num_stages=3,
         window_size=9,
-        depth=[0, 0, 1],
+        depth=[0, 1, 1],
         using_checkpoints=True,
         using_time_embedding=True,
         res_per_stage=[1, 1, 1],
         channels=[384, 768, 1536],
-        using_kl=False,
+        using_kl=True,
     )
 
     if is_master:
@@ -155,11 +149,11 @@ def main():
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=1e-4,
-        weight_decay=2e-5,
+        weight_decay=1e-5,
         betas=(0.9, 0.999),
     )
 
-    warmup_epochs = 15
+    warmup_epochs = 5
     min_lr = 5e-7
 
     warmup_scheduler = LinearLR(
@@ -190,14 +184,14 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-4,  # KL 目标权重，如未使用 KL 可设为 0
-        tb_dir="/home/ximutian/tensorboard_logs/swinunet_2022_2024_3_21",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_2022_2024_3_21",
+        tb_dir="/home/ximutian/tensorboard_logs/swinunet_fsdp_3yrs_3_18",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_fsdp_3yrs_3_18",
         save_interval=1,
         use_amp=True,
         rank=rank,
         world_size=world_size,
-        kl_anneal=False,           # 启用 KL annealing
-        kl_anneal_epochs=7,      # 前 10 个 epoch 从 0 线性涨到 beta
+        kl_anneal=True,           # 启用 KL annealing
+        kl_anneal_epochs=10,      # 前 10 个 epoch 从 0 线性涨到 beta
     )
 
     trainer.train(

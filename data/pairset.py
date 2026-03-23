@@ -72,9 +72,9 @@ class GFS2ERA5Dataset(Dataset):
         self.max_samples_per_year = max_samples_per_year
         self.sample_seed = int(sample_seed)
 
-
-        self.ds_x = xr.open_zarr(self.x_path)
-        self.ds_y = xr.open_zarr(self.y_path)
+        # 显式使用 consolidated=False 打开 Zarr，避免自动探测失败的警告
+        self.ds_x = xr.open_zarr(self.x_path, consolidated=False)
+        self.ds_y = xr.open_zarr(self.y_path, consolidated=False)
 
         x_times = pd.DatetimeIndex(self.ds_x.time.values)
         y_times = pd.DatetimeIndex(self.ds_y.time.values)

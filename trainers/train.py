@@ -52,10 +52,18 @@ class BaseTrainer:
         self.train_loss_history = []
         self.val_loss_history = []
 
-        self.writer = SummaryWriter(
-            log_dir=tb_dir
-        )
-        print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
+        # 仅在单卡或分布式的主进程上创建 TensorBoard writer，避免多进程重复写日志
+        self.writer = None
+        is_master_local = True
+        try:
+            if dist.is_available() and dist.is_initialized():
+                is_master_local = (dist.get_rank() == 0)
+        except Exception:
+            is_master_local = True
+
+        if is_master_local:
+            self.writer = SummaryWriter(log_dir=tb_dir)
+            print(f"TensorBoard logs will be saved to: {self.writer.log_dir}")
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -156,10 +164,19 @@ class BaseTrainer:
             self.writer.add_scalar("best/val_loss", current_avg_loss,  epoch + self.start_epoch)
 
     def load_checkpoint(self, path, strict=True, only_model=False):
-        
-        print(f"Loading checkpoint from {path} ...")
+        # 仅在主进程打印加载信息，避免多卡重复输出
+        if not hasattr(self, "is_master") or getattr(self, "is_master", True):
+            print(f"Loading checkpoint from {path} ...")
         checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
+        state_dict = checkpoint['model_state_dict']
+
+        # 兼容 FSDP 等不支持 strict 关键字参数的情况
+        try:
+            self.model.load_state_dict(state_dict, strict=strict)
+        except TypeError:
+            # 回退到不带 strict 的调用（例如某些 FSDP 版本）
+            self.model.load_state_dict(state_dict)
+
         if not only_model:
         
             if 'optimizer_state_dict' in checkpoint and self.opt:
