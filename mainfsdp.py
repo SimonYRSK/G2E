@@ -198,6 +198,7 @@ def main():
         world_size=world_size,
         kl_anneal=False,           # 启用 KL annealing
         kl_anneal_epochs=7,      # 前 10 个 epoch 从 0 线性涨到 beta
+        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_2022_2024_3_21",
     )
 
     trainer.train(

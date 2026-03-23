@@ -1,3 +1,7 @@
+import os
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
@@ -35,6 +39,7 @@ class FSDPUNetTrainer(UNetTrainer):
         is_master: bool | None = None,
         kl_anneal: bool = False,
         kl_anneal_epochs: int = 10,
+        plot_root: str | None = None,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -77,6 +82,28 @@ class FSDPUNetTrainer(UNetTrainer):
             self.writer.close()
             self.writer = None
 
+        # 画图输出根目录（可由外部传入）
+        self.plot_root = plot_root
+
+        # 从验证集 Dataset 中记录通道名与经纬度，用于画图
+        ds = getattr(val_loader, "dataset", None)
+        self.plot_lat = None
+        self.plot_lon = None
+        self.channel_names = None
+        self.channel_to_idx = None
+        if ds is not None:
+            # GFS2ERA5Dataset 中有 target_channels 和 ds_y
+            if hasattr(ds, "target_channels"):
+                self.channel_names = list(ds.target_channels)
+                self.channel_to_idx = {name: idx for idx, name in enumerate(self.channel_names)}
+            if hasattr(ds, "ds_y"):
+                try:
+                    self.plot_lat = ds.ds_y["lat"].values
+                    self.plot_lon = ds.ds_y["lon"].values
+                except Exception:
+                    self.plot_lat = None
+                    self.plot_lon = None
+
     def save_checkpoint(self, epoch, current_avg_loss):
         if not self.is_master:
             return
@@ -103,6 +130,9 @@ class FSDPUNetTrainer(UNetTrainer):
         total_loss = 0.0
         total_recon_loss = 0.0
         num_batches = 0
+
+        # 只在第一个正常 batch 上画图
+        has_plotted = False
 
         device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device).split(":")[0]
 
@@ -142,6 +172,16 @@ class FSDPUNetTrainer(UNetTrainer):
                 total_recon_loss += float(recon_loss.detach())
                 num_batches += 1
 
+                # 在首个正常 batch 上画图（只在主进程）
+                if self.is_master and not has_plotted:
+                    try:
+                        self._plot_validation_maps(epoch, x_recon, y, times)
+                    except Exception as e:
+                        # 避免画图错误中断训练，仅在主进程打印
+                        if self.is_master:
+                            print(f"[Val] 绘图时出错: {e}")
+                    has_plotted = True
+
         # 若全部 batch 都被跳过，避免除以 0
         if num_batches == 0:
             if self.is_master:
@@ -162,6 +202,102 @@ class FSDPUNetTrainer(UNetTrainer):
                 self.writer.add_scalar("Loss/val/recon", avg_recon, global_step)
 
         return avg_loss
+
+    def _plot_validation_maps(self, epoch, x_recon, y, times):
+        """在验证集首个正常 batch 上，为指定通道画 GT vs 预测 对比图。
+
+        仅在 rank0 调用。借鉴 picture.py 的三联图格式：GT / Forecast / Forecast-GT，
+        且 GT 与 Forecast 共用相同的 colorbar 范围。
+        """
+        if not self.is_master:
+            return
+
+        if self.plot_lat is None or self.plot_lon is None:
+            print("[Val] 无法获取经纬度坐标，跳过画图")
+            return
+
+        if self.channel_to_idx is None or self.channel_names is None:
+            print("[Val] 无法获取通道名称，跳过画图")
+            return
+
+        # 近地面变量与 500hPa 高空变量通道名
+        near_surface_channels = ["t2m", "u10m", "v10m", "msl", "tp"]
+        level500_channels = ["t500", "u500", "v500", "z500", "q500"]
+
+        # 仅取当前 batch 的第一个样本作图
+        pred_sample = x_recon[0].detach().cpu().numpy()  # (C, H, W)
+        gt_sample = y[0].detach().cpu().numpy()          # (C, H, W)
+
+        # 时间字符串用于文件名
+        try:
+            t0 = pd.Timestamp(str(times[0]))
+            time_str = t0.strftime("%Y%m%d_%H%M")
+        except Exception:
+            time_str = "unknown_time"
+
+        lat = self.plot_lat
+        lon = self.plot_lon
+
+        import matplotlib.pyplot as plt
+
+        # 输出根目录：优先使用外部传入的 plot_root
+        if self.plot_root is None:
+            print("[Val] 未设置 plot_root，使用默认路径")
+            out_root = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_2022_2024_3_21"
+        else:
+            out_root = self.plot_root
+        epoch_dir = os.path.join(out_root, f"epoch_{epoch+1:03d}")
+        os.makedirs(epoch_dir, exist_ok=True)
+
+        def plot_one_channel(ch_name: str):
+            if ch_name not in self.channel_to_idx:
+                print(f"[Val] 通道 {ch_name} 不在当前 target_channels 中，跳过")
+                return
+
+            idx = self.channel_to_idx[ch_name]
+            gt_2d = gt_sample[idx]
+            pred_2d = pred_sample[idx]
+
+            # 统一 GT 与 Forecast 的 colorbar 范围
+            vmin = float(np.nanmin([gt_2d.min(), pred_2d.min()]))
+            vmax = float(np.nanmax([gt_2d.max(), pred_2d.max()]))
+            if vmin == vmax:
+                vmax = vmin + 1e-6
+
+            diff_2d = pred_2d - gt_2d
+            diff_max = float(np.nanmax(np.abs(diff_2d)))
+            if diff_max == 0:
+                diff_max = 1e-6
+
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+            im0 = axes[0].pcolormesh(lon, lat, gt_2d, shading="auto", vmin=vmin, vmax=vmax)
+            axes[0].set_title(f"GT - {ch_name}")
+            plt.colorbar(im0, ax=axes[0])
+
+            im1 = axes[1].pcolormesh(lon, lat, pred_2d, shading="auto", vmin=vmin, vmax=vmax)
+            axes[1].set_title(f"Forecast - {ch_name}")
+            plt.colorbar(im1, ax=axes[1])
+
+            im2 = axes[2].pcolormesh(lon, lat, diff_2d, shading="auto", vmin=-diff_max, vmax=diff_max)
+            axes[2].set_title(f"Forecast - GT - {ch_name}")
+            plt.colorbar(im2, ax=axes[2])
+
+            for ax in axes:
+                ax.set_xlabel("lon")
+                ax.set_ylabel("lat")
+
+            fig.suptitle(f"Epoch {epoch+1} Val Sample, {time_str}, {ch_name}")
+            fig.tight_layout()
+
+            fname = f"epoch{epoch+1:03d}_{time_str}_{ch_name}.png"
+            save_path = os.path.join(epoch_dir, fname)
+            plt.savefig(save_path, dpi=200, bbox_inches="tight")
+            plt.close(fig)
+            print(f"[Val] 已保存通道 {ch_name} 图像到: {save_path}")
+
+        for ch in near_surface_channels + level500_channels:
+            plot_one_channel(ch)
 
     def train_one_epoch(self, epoch):
         self.model.train()
