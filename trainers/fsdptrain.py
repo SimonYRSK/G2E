@@ -2,6 +2,7 @@ import os
 
 import numpy as np
 import pandas as pd
+import xarray as xr
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
@@ -91,6 +92,8 @@ class FSDPUNetTrainer(UNetTrainer):
         self.plot_lon = None
         self.channel_names = None
         self.channel_to_idx = None
+        self.era5_mean = None
+        self.era5_std = None
         if ds is not None:
             # GFS2ERA5Dataset 中有 target_channels 和 ds_y
             if hasattr(ds, "target_channels"):
@@ -104,10 +107,64 @@ class FSDPUNetTrainer(UNetTrainer):
                     self.plot_lat = None
                     self.plot_lon = None
 
+            # 尝试从 ERA5 路径加载反归一化所需的 mean/std
+            try:
+                self._load_denorm_stats(ds)
+            except Exception as e:
+                if self.is_master:
+                    print(f"[Init] 加载 ERA5 归一化参数失败，将使用未反归一化的值绘图: {e}")
+
     def save_checkpoint(self, epoch, current_avg_loss):
         if not self.is_master:
             return
         super().save_checkpoint(epoch, current_avg_loss)
+
+    def _load_denorm_stats(self, dataset):
+        """从 ERA5 数据目录加载 mean/std，用于反归一化 GT 和预测。
+
+        假定 ERA5 路径下存在 mean.nc 和 std.nc，变量名与主数据一致
+        （优先使用 'data'，否则取第一个变量）。
+        只选择 target_channels 对应的通道，保存为 numpy 数组 (C, H, W)。
+        """
+        # 数据集需要提供 y_path（ERA5 根目录）和 target_channels
+        if not hasattr(dataset, "y_path") or self.channel_names is None:
+            return
+
+        era5_root = dataset.y_path
+        mean_path = os.path.join(era5_root, "mean.nc")
+        std_path = os.path.join(era5_root, "std.nc")
+
+        if not (os.path.exists(mean_path) and os.path.exists(std_path)):
+            if self.is_master:
+                print(f"[Init] ERA5 mean/std 文件不存在: {mean_path}, {std_path}")
+            return
+
+        mean_ds = xr.open_dataset(mean_path)
+        std_ds = xr.open_dataset(std_path)
+
+        try:
+            # 选择变量名：优先 'data'，否则第一个变量
+            if "data" in mean_ds.data_vars:
+                var_name = "data"
+            else:
+                var_name = list(mean_ds.data_vars)[0]
+
+            mean_da = mean_ds[var_name]
+            std_da = std_ds[var_name]
+
+            # 按通道名对齐到 target_channels 顺序
+            if "channel" in mean_da.dims:
+                mean_da = mean_da.sel(channel=self.channel_names)
+                std_da = std_da.sel(channel=self.channel_names)
+
+            self.era5_mean = mean_da.values.astype(np.float32)
+            self.era5_std = std_da.values.astype(np.float32)
+
+            if self.is_master:
+                print(f"[Init] 已加载 ERA5 归一化参数，形状: mean={self.era5_mean.shape}, std={self.era5_std.shape}")
+        finally:
+            mean_ds.close()
+            std_ds.close()
 
     def _all_reduce_loss(self, total_loss: float, total_recon: float, num_batches: int):
         """在所有进程间做 all_reduce，得到全局平均 loss。"""
@@ -257,6 +314,17 @@ class FSDPUNetTrainer(UNetTrainer):
             idx = self.channel_to_idx[ch_name]
             gt_2d = gt_sample[idx]
             pred_2d = pred_sample[idx]
+
+            # 若存在 ERA5 的 mean/std，则先反归一化到物理量
+            if self.era5_mean is not None and self.era5_std is not None:
+                try:
+                    mean_2d = self.era5_mean[idx]
+                    std_2d = self.era5_std[idx]
+                    gt_2d = gt_2d * std_2d + mean_2d
+                    pred_2d = pred_2d * std_2d + mean_2d
+                except Exception as e:
+                    if self.is_master:
+                        print(f"[Val] 通道 {ch_name} 反归一化失败，将使用归一化值绘图: {e}")
 
             # 统一 GT 与 Forecast 的 colorbar 范围
             vmin = float(np.nanmin([gt_2d.min(), pred_2d.min()]))
