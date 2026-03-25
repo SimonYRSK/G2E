@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from data.pairset import GFS2ERA5Dataset
@@ -159,26 +159,17 @@ def main():
         betas=(0.9, 0.999),
     )
 
-    warmup_epochs = 15
     min_lr = 5e-7
 
-    warmup_scheduler = LinearLR(
+    # 使用基于验证集 loss 的自适应学习率调度器
+    scheduler = ReduceLROnPlateau(
         optimizer,
-        start_factor=0.1,
-        end_factor=1.0,
-        total_iters=warmup_epochs,
-    )
-
-    cosine_scheduler = CosineAnnealingLR(
-        optimizer,
-        T_max=num_epochs - warmup_epochs,
-        eta_min=min_lr,
-    )
-
-    scheduler = SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[warmup_epochs],
+        mode="min",
+        factor=0.5,
+        patience=3,
+        threshold=1e-4,
+        min_lr=min_lr,
+        verbose=(rank == 0),
     )
 
     trainer = FSDPUNetTrainer(

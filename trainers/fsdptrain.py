@@ -122,9 +122,10 @@ class FSDPUNetTrainer(UNetTrainer):
     def _load_denorm_stats(self, dataset):
         """从 ERA5 数据目录加载 mean/std，用于反归一化 GT 和预测。
 
-        假定 ERA5 路径下存在 mean.nc 和 std.nc，变量名与主数据一致
-        （优先使用 'data'，否则取第一个变量）。
-        只选择 target_channels 对应的通道，保存为 numpy 数组 (C, H, W)。
+        假定 ERA5 路径下存在 mean.nc 和 std.nc，格式与 FuXi 推理一致：
+        使用 xr.open_dataarray 读取，并通过 channel 这个坐标对齐。
+        只选择 target_channels 对应的通道（通常 70 个），保存为 numpy 数组 (C, H, W)。
+        同时在首次加载时，可选地额外导出裁剪后的 meanc70.nc / stdc70.nc 方便复用。
         """
         # 数据集需要提供 y_path（ERA5 根目录）和 target_channels
         if not hasattr(dataset, "y_path") or self.channel_names is None:
@@ -139,32 +140,37 @@ class FSDPUNetTrainer(UNetTrainer):
                 print(f"[Init] ERA5 mean/std 文件不存在: {mean_path}, {std_path}")
             return
 
-        mean_ds = xr.open_dataset(mean_path)
-        std_ds = xr.open_dataset(std_path)
+        # 按 FuXi 推理方式读取：DataArray + 按 channel 对齐
+        mean_da_full = xr.open_dataarray(mean_path)
+        std_da_full = xr.open_dataarray(std_path)
 
-        try:
-            # 选择变量名：优先 'data'，否则第一个变量
-            if "data" in mean_ds.data_vars:
-                var_name = "data"
-            else:
-                var_name = list(mean_ds.data_vars)[0]
-
-            mean_da = mean_ds[var_name]
-            std_da = std_ds[var_name]
-
-            # 按通道名对齐到 target_channels 顺序
-            if "channel" in mean_da.dims:
-                mean_da = mean_da.sel(channel=self.channel_names)
-                std_da = std_da.sel(channel=self.channel_names)
-
-            self.era5_mean = mean_da.values.astype(np.float32)
-            self.era5_std = std_da.values.astype(np.float32)
-
+        if "channel" not in mean_da_full.dims:
             if self.is_master:
-                print(f"[Init] 已加载 ERA5 归一化参数，形状: mean={self.era5_mean.shape}, std={self.era5_std.shape}")
-        finally:
-            mean_ds.close()
-            std_ds.close()
+                print("[Init] mean/std 中缺少 channel 维度，无法按通道名对齐")
+            return
+
+        # 裁剪并重排到 target_channels 顺序（通常 70 个通道）
+        mean_da_c70 = mean_da_full.sel(channel=self.channel_names)
+        std_da_c70 = std_da_full.sel(channel=self.channel_names)
+
+        self.era5_mean = mean_da_c70.values.astype(np.float32)
+        self.era5_std = std_da_c70.values.astype(np.float32)
+
+        # 可选：在首次加载时额外导出 meanc70.nc / stdc70.nc，方便其他脚本直接使用
+        if self.is_master:
+            mean_c70_path = os.path.join(era5_root, "meanc70.nc")
+            std_c70_path = os.path.join(era5_root, "stdc70.nc")
+            try:
+                if not os.path.exists(mean_c70_path):
+                    mean_da_c70.to_netcdf(mean_c70_path)
+                    print(f"[Init] 已导出裁剪后的均值文件: {mean_c70_path}")
+                if not os.path.exists(std_c70_path):
+                    std_da_c70.to_netcdf(std_c70_path)
+                    print(f"[Init] 已导出裁剪后的方差文件: {std_c70_path}")
+            except Exception as e:
+                print(f"[Init] 导出 meanc70/stdc70 失败，可忽略（不影响训练绘图）: {e}")
+
+            print(f"[Init] 已加载 ERA5 归一化参数，形状: mean={self.era5_mean.shape}, std={self.era5_std.shape}")
 
     def _all_reduce_loss(self, total_loss: float, total_recon: float, num_batches: int):
         """在所有进程间做 all_reduce，得到全局平均 loss。"""
