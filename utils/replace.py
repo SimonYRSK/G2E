@@ -13,7 +13,7 @@ ERA5_RAW = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/data
 GFS_RAW  = ERA5_RAW   # 测试时用 ERA5 自己，确保替换前后数值不变
 
 # 输出目录
-OUTPUT_ROOT = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/localreplaced/with_trans_gfs"
+OUTPUT_ROOT = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/localreplaced/with_trans_gfs/swinunet_2022_2024_1yr_3_25_20250415"
 
 # 要替换的通道（根据需要修改）
 TARGET_CHANNELS = [
@@ -154,8 +154,8 @@ if __name__ == "__main__":
     # 执行替换
     create_local_replaced(
         era5_path=ERA5_RAW,
-        gfs_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline2_2",   #/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline1_25   /cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized     
-        time_slice=["20240101", "20240101"]
+        gfs_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/swinunet_2022_2024_1yr_3_25_20250415",   #/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline1_25   /cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized     
+        time_slice=["20250415", "20250415"]
     )
 
     # 测试对比
@@ -165,7 +165,7 @@ if __name__ == "__main__":
     zarr_new  = xr.open_zarr(output_path)
 
     # 使用 Timestamp 创建时间对象，更可靠
-    t = pd.Timestamp("2024-01-01 12:00:00")
+    t = pd.Timestamp("2025-04-15 12:00:00")
     ch = "t1000"
 
     try:

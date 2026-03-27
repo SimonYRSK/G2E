@@ -182,15 +182,15 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-4,  # KL 目标权重，如未使用 KL 可设为 0
-        tb_dir="/home/ximutian/tensorboard_logs/swinunet_2022_2024_1yr_3_25",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_2022_2024_1yr_3_25",
+        tb_dir="/home/ximutian/tensorboard_logs/swinunet_2022_2024_1yr_3_26",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_2022_2024_1yr_3_26",
         save_interval=1,
         use_amp=True,
         rank=rank,
         world_size=world_size,
         kl_anneal=False,           # 启用 KL annealing
         kl_anneal_epochs=7,      # 前 10 个 epoch 从 0 线性涨到 beta
-        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_2022_2024_1yr_3_25",
+        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_2022_2024_1yr_3_26",
     )
 
     trainer.train(

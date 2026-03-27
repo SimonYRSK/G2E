@@ -33,12 +33,12 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
         num_heads=8,
         num_stages=3,
         window_size=9,
-        depth=[0, 1, 1],
+        depth=[0, 0, 1],
         using_checkpoints=True,
         using_time_embedding=True,
         res_per_stage=[1, 1, 1],
         channels=[384, 768, 1536],
-        using_kl=True,
+        using_kl=False,
     )
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -106,10 +106,15 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
     print(f"📈 拼接后总结果形状: {arr.shape}")
     
     print("saving as zarr")
-    ds_gfs = xr.open_zarr(gfs_path)
+    # 与训练时一致：显式使用 consolidated=False，并按 TARGET_CHANNELS 选择/重排通道
+    ds_gfs = xr.open_zarr(gfs_path, consolidated=False)
 
     time_list = test_loader.dataset.time_list
-    ds_gfs_sel = ds_gfs.sel(time=pd.to_datetime(time_list))
+    # 先按时间再按通道名选择，确保 channel 顺序与 TARGET_CHANNELS 一致
+    ds_gfs_sel = ds_gfs.sel(
+        time=pd.to_datetime(time_list),
+        channel=list(TARGET_CHANNELS),
+    )
 
     new_ds = xr.Dataset(
         {
@@ -137,8 +142,8 @@ if __name__ == "__main__":
 
     # 使用 2025-03-15 一整天 (00, 06, 12, 18) 作为推理时间段，来自 2025 标准化 GFS
     test_set = GFS2ERA5Dataset(
-        start="2025-03-15 00:00:00",
-        end="2025-03-15 18:00:00",
+        start="2025-04-15 00:00:00",
+        end="2025-04-15 18:00:00",
         x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized",
     )
     
@@ -161,9 +166,10 @@ if __name__ == "__main__":
     print("loaded test set for 2025-03-15")
 
     inference(
-        checkpoint_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_fsdp_2022_2024_3_19/checkpoint_epoch_100.pth",
+        checkpoint_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_2022_2024_3yr_3_25/checkpoint_epoch_23.pth",
         device="cuda",
-        save_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/swinunet_fsdp_2022_2024_3_19_20250315",
+        save_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/swinunet_2022_2024_3yr_3_25_20250415",
         test_loader=test_loader,
         gfs_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized",
     )
+    #export LD_LIBRARY_PATH=/home/ximutian/miniconda3/envs/xuyue/lib:$LD_LIBRARY_PATH

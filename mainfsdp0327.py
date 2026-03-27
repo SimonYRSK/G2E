@@ -5,7 +5,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 
 from data.pairset import GFS2ERA5Dataset
@@ -162,15 +162,25 @@ def main():
 
     min_lr = 5e-7
 
-    # 使用基于验证集 loss 的自适应学习率调度器
-    scheduler = ReduceLROnPlateau(
+    # 使用 warmup + 余弦退火学习率调度器（按 epoch 进行 step）
+    warmup_epochs = 5
+    # 线性 warmup：从 0.1×lr 线性增加到 1.0×lr
+    warmup_scheduler = LinearLR(
         optimizer,
-        mode="min",
-        factor=0.5,
-        patience=3,
-        threshold=1e-4,
-        min_lr=min_lr,
-        verbose=(rank == 0),
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    # 余弦退火：从当前 lr 逐步衰减到 min_lr
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=max(num_epochs - warmup_epochs, 1),
+        eta_min=min_lr,
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs],
     )
 
     trainer = FSDPUNetTrainer(
@@ -183,14 +193,14 @@ def main():
         device=device,
         beta=1e-4,  # KL 目标权重，如未使用 KL 可设为 0
         tb_dir="/home/ximutian/tensorboard_logs/swinunet_2022_2024_1yr_3_25",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_2022_2024_1yr_3_25",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_2022_2024_yr_3_27",
         save_interval=1,
         use_amp=True,
         rank=rank,
         world_size=world_size,
         kl_anneal=False,           # 启用 KL annealing
         kl_anneal_epochs=7,      # 前 10 个 epoch 从 0 线性涨到 beta
-        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_2022_2024_1yr_3_25",
+        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_2022_2024_yr_3_27",
     )
 
     trainer.train(

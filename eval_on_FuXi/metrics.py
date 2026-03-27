@@ -9,9 +9,9 @@ from pathlib import Path
 
 # 新路径
 PRED_ROOT_RTM = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/eval/RTM_base_6h/20240101-12"
-PRED_ROOT_ERA5 = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/era5/20240101-12"
-PRED_ROOT_NAIVE_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_naive_gfs/20240101-12"
-PRED_ROOT_TRANS_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_trans_gfs/20240101-12"
+PRED_ROOT_ERA5 = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/era5/20250315-12"
+PRED_ROOT_NAIVE_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_naive_gfs/20250315-12"
+PRED_ROOT_TRANS_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_trans_gfs/swinunet_2022_2024_3yr_3_25_20250315/20250315-12"
 ERA5_ROOT = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/datasets/era5.rtm.02_25.6h.c109.new3/"
 TARGET_CHANNEL = "z500"
 
@@ -98,7 +98,7 @@ def compute_acc(out, tgt, clim):
 STEPS = get_steps(PRED_ROOT_TRANS_GFS)  # 自动确定 STEPS
 
 # 预测起始时间（需与预测步长对应）
-start_time = pd.Timestamp("2024-01-01 12:00:00")  # 原代码中的起始时间，假设相同
+start_time = pd.Timestamp("2025-03-15 12:00:00")  # 原代码中的起始时间，假设相同
 hour_interval = 6  # 步长间隔
 times = [start_time + pd.Timedelta(hours=hour_interval * int(step)) for step in STEPS]  # 注意 int(step) 因为 step 是 '001' 等
 clim = xr.open_zarr("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/eval/era5/clim.daily")
@@ -146,7 +146,7 @@ plt.title('ACC (z500)')
 plt.legend()
 plt.grid()
 plt.tight_layout()
-plt.savefig("z500_acc_rtm_curve.png")
+plt.savefig("z500_acc_rtm_curve3yrs.png")
 plt.close()
 
 plt.figure(figsize=(10,5))
@@ -159,8 +159,5 @@ plt.title('RMSE (z500)')
 plt.legend()
 plt.grid()
 plt.tight_layout()
-plt.savefig("z500_rmse_rtm_curve.png")
+plt.savefig("z500_rmse_rtm_curve3yrs.png")
 plt.close()
-
-
-print("评估完成，曲线已保存为 z500_acc_rtm_curve.png")
