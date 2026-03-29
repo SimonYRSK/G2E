@@ -353,7 +353,16 @@ class FSDPUNetTrainer(UNetTrainer):
             axes[1].set_title(f"Forecast - {ch_name}")
             plt.colorbar(im1, ax=axes[1])
 
-            im2 = axes[2].pcolormesh(lon, lat, diff_2d, shading="auto", vmin=-diff_max, vmax=diff_max)
+            # 差值图使用蓝-白-红的发散色图：0 附近为白/灰，正值为红，负值为蓝
+            im2 = axes[2].pcolormesh(
+                lon,
+                lat,
+                diff_2d,
+                shading="auto",
+                vmin=-diff_max,
+                vmax=diff_max,
+                cmap="bwr",
+            )
             axes[2].set_title(f"Forecast - GT - {ch_name}")
             plt.colorbar(im2, ax=axes[2])
 
