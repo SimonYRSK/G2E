@@ -5,6 +5,7 @@ import shutil
 import warnings
 from pathlib import Path
 import pandas as pd
+import argparse
 
 warnings.filterwarnings('ignore')
 
@@ -13,7 +14,7 @@ ERA5_RAW = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/data
 GFS_RAW  = ERA5_RAW   # 测试时用 ERA5 自己，确保替换前后数值不变
 
 # 输出目录
-OUTPUT_ROOT = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/localreplaced/with_trans_gfs/swinunet_2022_2024_1yr_3_25_20250415"
+OUTPUT_ROOT = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/localreplaced/with_naive_gfs_real/20250601"
 
 # 要替换的通道（根据需要修改）
 TARGET_CHANNELS = [
@@ -90,6 +91,14 @@ def create_local_replaced(
     ds_gfs = ds_gfs.sortby("time")
     ds_gfs = ds_gfs.sel(time=slice(*time_slice))
 
+    # 2.5 对齐时间步（取交集）
+    common_time = np.intersect1d(ds_era5.time.values, ds_gfs.time.values)
+    if len(common_time) == 0:
+        print("时间范围无交集，无法替换")
+        return
+    ds_era5 = ds_era5.sel(time=common_time)
+    ds_gfs = ds_gfs.sel(time=common_time)
+
     # 3. 对齐方向
     ds_gfs = align_direction(ds_era5, ds_gfs)
 
@@ -151,22 +160,39 @@ def create_local_replaced(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Replace ERA5 channels with GFS output")
+    parser.add_argument("--era5_path", type=str, default=ERA5_RAW)
+    parser.add_argument("--gfs_path", type=str, default=GFS_RAW)
+    parser.add_argument("--output_root", type=str, default=OUTPUT_ROOT)
+    parser.add_argument("--time_slice", type=str, nargs=2, default=TIME_SLICE)
+    parser.add_argument("--validate", action="store_true")
+    parser.add_argument("--verify_time", type=str, default="2025-04-15 12:00:00")
+    parser.add_argument("--verify_channel", type=str, default="t1000")
+    args = parser.parse_args()
+
+    print(f"命令行输出目录: {args.output_root}")
+
     # 执行替换
     create_local_replaced(
-        era5_path=ERA5_RAW,
-        gfs_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/swinunet_2022_2024_1yr_3_25_20250415",   #/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced/baseline1_25   /cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized     
-        time_slice=["20250415", "20250415"]
+        era5_path=args.era5_path,
+        gfs_path=args.gfs_path,
+        output_root=args.output_root,
+        target_channels=TARGET_CHANNELS,
+        time_slice=list(args.time_slice),
     )
+
+    if not args.validate:
+        raise SystemExit(0)
 
     # 测试对比
     print("\n=== 开始验证替换前后差异 ===")
-    zarr_orig = xr.open_zarr(ERA5_RAW)
-    output_path = os.path.join(OUTPUT_ROOT, "era5_localreplaced.zarr")
+    zarr_orig = xr.open_zarr(args.era5_path)
+    output_path = os.path.join(args.output_root, "era5_localreplaced.zarr")
     zarr_new  = xr.open_zarr(output_path)
 
     # 使用 Timestamp 创建时间对象，更可靠
-    t = pd.Timestamp("2025-04-15 12:00:00")
-    ch = "t1000"
+    t = pd.Timestamp(args.verify_time)
+    ch = args.verify_channel
 
     try:
         orig = zarr_orig["data"].sel(time=t, channel=ch).compute()

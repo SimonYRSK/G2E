@@ -52,6 +52,7 @@ class GFS2ERA5Dataset(Dataset):
         end: str | None = None,
         x_path: str | None = None,
         y_path: str | None = None,
+        target_mode: str = "era5",
         # 验证集：指定年份，每个月随机抽取若干“整天”的所有时间步
         val_sample_per_month: int | None = None,
         val_sample_year: int | None = None,
@@ -62,6 +63,9 @@ class GFS2ERA5Dataset(Dataset):
         self.x_path = GFS_PATH if x_path is None else x_path
         self.y_path = ERA5_PATH if y_path is None else y_path
         self.target_channels = TARGET_CHANNELS if target_channels is None else target_channels
+        self.target_mode = str(target_mode).lower()
+        if self.target_mode not in {"era5", "diff"}:
+            raise ValueError(f"target_mode must be 'era5' or 'diff', got: {target_mode}")
 
 
         self.start_time = pd.to_datetime(START_TIME if start is None else start)
@@ -173,6 +177,12 @@ class GFS2ERA5Dataset(Dataset):
 
         x_np = x_data.values.astype(np.float32)
         y_np = y_data.values.astype(np.float32)
+
+        # 目标模式：
+        # - era5: 直接学习 GFS -> ERA5
+        # - diff: 学习 ERA5 - GFS 的差值（无需提前生成差值 zarr）
+        if self.target_mode == "diff":
+            y_np = y_np - x_np
         
         x_tensor = torch.from_numpy(x_np)
         y_tensor = torch.from_numpy(y_np)

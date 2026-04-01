@@ -6,8 +6,8 @@ import zarr
 import matplotlib.pyplot as plt
 import warnings
 from pathlib import Path
+import argparse
 
-# 新路径
 PRED_ROOT_RTM = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/huangqiusheng/eval/RTM_base_6h/20240101-12"
 PRED_ROOT_ERA5 = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/era5/20250315-12"
 PRED_ROOT_NAIVE_GFS = "/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/infertest/inference_naive_gfs/20250315-12"
@@ -94,70 +94,143 @@ def compute_acc(out, tgt, clim):
     acc = A / np.sqrt(B * C + 1e-12)
     return float(acc.compute())  # 先compute，再转float
 
-# 主逻辑
-STEPS = get_steps(PRED_ROOT_TRANS_GFS)  # 自动确定 STEPS
+def main():
+    global ERA5_ROOT, TARGET_CHANNEL
+    parser = argparse.ArgumentParser(description="Evaluate ACC/RMSE for z500")
+    parser.add_argument("--pred_root_era5", type=str, default=PRED_ROOT_ERA5)
+    parser.add_argument("--pred_root_naive_gfs", type=str, default=PRED_ROOT_NAIVE_GFS)
+    parser.add_argument("--pred_root_trans_gfs", type=str, default=PRED_ROOT_TRANS_GFS)
+    parser.add_argument("--era5_root", type=str, default=ERA5_ROOT)
+    parser.add_argument("--target_channel", type=str, default=TARGET_CHANNEL)
+    parser.add_argument("--start_time", type=str, default="2025-03-15 12:00:00")
+    parser.add_argument("--hour_interval", type=int, default=6)
+    parser.add_argument("--clim_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/eval/era5/clim.daily")
+    parser.add_argument("--output_dir", type=str, default=".")
+    parser.add_argument("--tag", type=str, default="3yr")
+    parser.add_argument("--date_tag", type=str, default="20250315")
+    parser.add_argument("--sanity_check", action="store_true")
+    args = parser.parse_args()
 
-# 预测起始时间（需与预测步长对应）
-start_time = pd.Timestamp("2025-03-15 12:00:00")  # 原代码中的起始时间，假设相同
-hour_interval = 6  # 步长间隔
-times = [start_time + pd.Timedelta(hours=hour_interval * int(step)) for step in STEPS]  # 注意 int(step) 因为 step 是 '001' 等
-clim = xr.open_zarr("/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/fanjiang/eval/era5/clim.daily")
+    ERA5_ROOT = args.era5_root
+    TARGET_CHANNEL = args.target_channel
 
-rmse_rtm = []
-rmse_era5 = []
-rmse_naive_gfs = []
-rmse_trans_gfs = []
+    print(f"pred_root_era5: {args.pred_root_era5}")
+    print(f"pred_root_naive_gfs: {args.pred_root_naive_gfs}")
+    print(f"pred_root_trans_gfs: {args.pred_root_trans_gfs}")
 
-acc_rtm = []
-acc_era5 = []
-acc_naive_gfs = []
-acc_trans_gfs = []
+    steps = get_steps(args.pred_root_trans_gfs)
+    start_time = pd.Timestamp(args.start_time)
+    hour_interval = args.hour_interval
+    times = [start_time + pd.Timedelta(hours=hour_interval * int(step)) for step in steps]
+    clim = xr.open_zarr(args.clim_path)
 
-for i, step in enumerate(STEPS):
-    trans_gfs_dir = os.path.join(PRED_ROOT_TRANS_GFS, f"{step}.zarr")
-    naive_gfs_dir = os.path.join(PRED_ROOT_NAIVE_GFS, f"{step}.zarr")
-    era5_dir = os.path.join(PRED_ROOT_ERA5, f"{step}.zarr")
-    # 预测
-    pred_trans_gfs = get_pred_z500(trans_gfs_dir, times[i])
-    pred_naive_gfs = get_pred_z500(naive_gfs_dir, times[i])
-    pred_era5 = get_pred_z500(era5_dir, times[i])
-    # 真实
-    true = get_true_z500(times[i])
-    # 评估 RMSE
-    rmse_trans_gfs.append(calc_rmse(pred_trans_gfs, true))
-    rmse_naive_gfs.append(calc_rmse(pred_naive_gfs, true))
-    rmse_era5.append(calc_rmse(pred_era5, true))
+    if args.sanity_check:
+        try:
+            if os.path.samefile(args.pred_root_naive_gfs, args.pred_root_trans_gfs):
+                print("⚠️ naive_gfs 与 trans_gfs 目录相同，结果会完全一致")
+        except Exception:
+            pass
 
-    acc_trans_gfs.append(compute_acc(pred_trans_gfs, true, clim))
-    acc_naive_gfs.append(compute_acc(pred_naive_gfs, true, clim))
-    acc_era5.append(compute_acc(pred_era5, true, clim))
-    #print(f"Step {step}:ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Trans GFS RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
+        if steps:
+            step0 = steps[0]
+            naive_dir = os.path.join(args.pred_root_naive_gfs, f"{step0}.zarr")
+            trans_dir = os.path.join(args.pred_root_trans_gfs, f"{step0}.zarr")
+            try:
+                naive = get_pred_z500(naive_dir, pd.Timestamp(args.start_time))
+                trans = get_pred_z500(trans_dir, pd.Timestamp(args.start_time))
+                diff = (naive - trans).values
+                print(
+                    f"sanity_check step {step0}: "
+                    f"naive[min={float(naive.min()):.3f}, max={float(naive.max()):.3f}, mean={float(naive.mean()):.3f}] "
+                    f"trans[min={float(trans.min()):.3f}, max={float(trans.max()):.3f}, mean={float(trans.mean()):.3f}] "
+                    f"diff_abs_max={float(np.nanmax(np.abs(diff))):.6f}"
+                )
+            except Exception as e:
+                print(f"sanity_check 失败: {e}")
 
-    print(f"Step {step}:Naive ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | Naive GFS RMSE={rmse_naive_gfs[-1]:.3f}, ACC={acc_naive_gfs[-1]:.3f} | GFS2ERA5 RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}")
+    rmse_era5 = []
+    rmse_naive_gfs = []
+    rmse_trans_gfs = []
+    acc_era5 = []
+    acc_naive_gfs = []
+    acc_trans_gfs = []
+
+    log_lines = []
+
+    for i, step in enumerate(steps):
+        trans_gfs_dir = os.path.join(args.pred_root_trans_gfs, f"{step}.zarr")
+        naive_gfs_dir = os.path.join(args.pred_root_naive_gfs, f"{step}.zarr")
+        era5_dir = os.path.join(args.pred_root_era5, f"{step}.zarr")
+        if not (os.path.exists(trans_gfs_dir) and os.path.exists(naive_gfs_dir) and os.path.exists(era5_dir)):
+            print(f"跳过 step {step}: 预测或真值缺失")
+            continue
+        pred_trans_gfs = get_pred_z500(trans_gfs_dir, times[i])
+        pred_naive_gfs = get_pred_z500(naive_gfs_dir, times[i])
+        pred_era5 = get_pred_z500(era5_dir, times[i])
+        true = get_true_z500(times[i])
+
+        rmse_trans_gfs.append(calc_rmse(pred_trans_gfs, true))
+        rmse_naive_gfs.append(calc_rmse(pred_naive_gfs, true))
+        rmse_era5.append(calc_rmse(pred_era5, true))
+
+        acc_trans_gfs.append(compute_acc(pred_trans_gfs, true, clim))
+        acc_naive_gfs.append(compute_acc(pred_naive_gfs, true, clim))
+        acc_era5.append(compute_acc(pred_era5, true, clim))
+
+        line = (
+            f"Step {step}:Naive ERA5 RMSE={rmse_era5[-1]:.3f}, ACC={acc_era5[-1]:.3f} | "
+            f"Naive GFS RMSE={rmse_naive_gfs[-1]:.3f}, ACC={acc_naive_gfs[-1]:.3f} | "
+            f"GFS2ERA5 RMSE={rmse_trans_gfs[-1]:.3f}, ACC={acc_trans_gfs[-1]:.3f}"
+        )
+        print(line)
+        log_lines.append(line)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    out_csv = os.path.join(args.output_dir, f"metrics_{args.tag}_{args.date_tag}.csv")
+    out_txt = os.path.join(args.output_dir, f"metrics_{args.tag}_{args.date_tag}.txt")
+
+    df = pd.DataFrame({
+        "step": [int(s) for s in steps],
+        "rmse_era5": rmse_era5,
+        "rmse_naive_gfs": rmse_naive_gfs,
+        "rmse_trans_gfs": rmse_trans_gfs,
+        "acc_era5": acc_era5,
+        "acc_naive_gfs": acc_naive_gfs,
+        "acc_trans_gfs": acc_trans_gfs,
+    })
+    df.to_csv(out_csv, index=False)
+    with open(out_txt, "w", encoding="utf-8") as f:
+        f.write("\n".join(log_lines))
+
+    acc_png = os.path.join(args.output_dir, f"z500_acc_rtm_curve_{args.tag}_{args.date_tag}.png")
+    rmse_png = os.path.join(args.output_dir, f"z500_rmse_rtm_curve_{args.tag}_{args.date_tag}.png")
+
+    plt.figure(figsize=(10,5))
+    plt.plot([int(s) for s in steps], acc_era5, label='Naive_ERA5 ACC', marker='o')
+    plt.plot([int(s) for s in steps], acc_naive_gfs, label='Naive_GFS ACC', marker='o')
+    plt.plot([int(s) for s in steps], acc_trans_gfs, label='GFS_2_ERA5 ACC', marker='o')
+    plt.xlabel('Forecast Step')
+    plt.ylabel('ACC')
+    plt.title('ACC (z500)')
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(acc_png)
+    plt.close()
+
+    plt.figure(figsize=(10,5))
+    plt.plot([int(s) for s in steps], rmse_era5, label='Naive_ERA5 RMSE', marker='o')
+    plt.plot([int(s) for s in steps], rmse_naive_gfs, label='Naive_GFS RMSE', marker='o')
+    plt.plot([int(s) for s in steps], rmse_trans_gfs, label='GFS_2_ERA5 RMSE', marker='o')
+    plt.xlabel('Forecast Step')
+    plt.ylabel('RMSE')
+    plt.title('RMSE (z500)')
+    plt.legend()
+    plt.grid()
+    plt.tight_layout()
+    plt.savefig(rmse_png)
+    plt.close()
 
 
-plt.figure(figsize=(10,5))
-plt.plot([int(s) for s in STEPS], acc_era5, label='Naive_ERA5 ACC', marker='o')
-plt.plot([int(s) for s in STEPS], acc_naive_gfs, label='Naive_GFS ACC', marker='o')
-plt.plot([int(s) for s in STEPS], acc_trans_gfs, label='GFS_2_ERA5 ACC', marker='o')
-plt.xlabel('Forecast Step')
-plt.ylabel('ACC')
-plt.title('ACC (z500)')
-plt.legend()
-plt.grid()
-plt.tight_layout()
-plt.savefig("z500_acc_rtm_curve3yrs.png")
-plt.close()
-
-plt.figure(figsize=(10,5))
-plt.plot([int(s) for s in STEPS], rmse_era5, label='Naive_ERA5 RMSE', marker='o')
-plt.plot([int(s) for s in STEPS], rmse_naive_gfs, label='Naive_GFS RMSE', marker='o')
-plt.plot([int(s) for s in STEPS], rmse_trans_gfs, label='GFS_2_ERA5 RMSE', marker='o')
-plt.xlabel('Forecast Step')
-plt.ylabel('RMSE')
-plt.title('RMSE (z500)')
-plt.legend()
-plt.grid()
-plt.tight_layout()
-plt.savefig("z500_rmse_rtm_curve3yrs.png")
-plt.close()
+if __name__ == "__main__":
+    main()
