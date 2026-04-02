@@ -41,10 +41,18 @@ class FSDPUNetTrainer(UNetTrainer):
         kl_anneal: bool = False,
         kl_anneal_epochs: int = 10,
         plot_root: str | None = None,
+        recon_loss_type: str = "l2",
+        use_grad_loss: bool = False,
+        grad_loss_weight: float = 0.0,
     ):
         self.rank = rank
         self.world_size = world_size
         self.is_master = (rank == 0) if is_master is None else is_master
+        self.recon_loss_type = str(recon_loss_type).lower()
+        if self.recon_loss_type not in {"l1", "l2"}:
+            raise ValueError(f"recon_loss_type must be one of ['l1','l2'], got: {recon_loss_type}")
+        self.use_grad_loss = bool(use_grad_loss)
+        self.grad_loss_weight = float(grad_loss_weight)
 
         # 对 FSDP 包裹的模型，同步内外层的 using_kl 标志，
         # 确保 Trainer 在分布式场景下也能正确识别是否启用 KL
@@ -77,6 +85,10 @@ class FSDPUNetTrainer(UNetTrainer):
 
         if self.is_master:
             print(f"[FSDPUNetTrainer] using_kl = {self.using_kl}")
+            print(
+                f"[FSDPUNetTrainer] recon_loss_type = {self.recon_loss_type}, "
+                f"use_grad_loss = {self.use_grad_loss}, grad_loss_weight = {self.grad_loss_weight}"
+            )
 
         # 非主进程关闭 TensorBoard，避免多进程同时写
         if not self.is_master and hasattr(self, "writer") and self.writer is not None:
@@ -188,10 +200,43 @@ class FSDPUNetTrainer(UNetTrainer):
         avg_recon = float(total_recon_g / num_batches_g)
         return avg_loss, avg_recon
 
+    def _compute_recon_loss_details(self, pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor | None = None):
+        """返回 (recon_loss, l1_raw, l2_raw)。仅二选一作为 recon。"""
+        l1_raw = None
+        l2_raw = None
+
+        if self.recon_loss_type == "l1":
+            abs_err = torch.abs(pred - target)
+            if weight is not None:
+                l1_raw = torch.mean(abs_err * weight.float())
+            else:
+                l1_raw = torch.mean(abs_err)
+            recon_loss = l1_raw
+        else:
+            l2_raw = self.cal_losses(pred, target, weight=weight)
+            recon_loss = l2_raw
+
+        return recon_loss, l1_raw, l2_raw
+
+    def _compute_grad_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """一阶差分梯度损失（L1）。"""
+        # 经向（lon）与纬向（lat）梯度
+        pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+        pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+        tgt_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
+        tgt_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
+
+        loss_dx = torch.mean(torch.abs(pred_dx - tgt_dx))
+        loss_dy = torch.mean(torch.abs(pred_dy - tgt_dy))
+        return 0.5 * (loss_dx + loss_dy)
+
     def validate_one_epoch(self, epoch):
         self.model.eval()
         total_loss = 0.0
         total_recon_loss = 0.0
+        total_l1_loss = 0.0
+        total_l2_loss = 0.0
+        total_grad_loss = 0.0
         num_batches = 0
 
         # 只在第一个正常 batch 上画图
@@ -223,16 +268,22 @@ class FSDPUNetTrainer(UNetTrainer):
                         x_recon = self.model(x, times=times)
                         mu = log_var = None
 
-                    recon_loss = self.cal_losses(x_recon, y, weight=weights)
+                    recon_loss, l1_raw, l2_raw = self._compute_recon_loss_details(x_recon, y, weight=weights)
+                    grad_loss = self._compute_grad_loss(x_recon, y) if self.use_grad_loss else torch.tensor(0.0, device=self.device)
 
                     if getattr(self, "using_kl", False) and mu is not None and log_var is not None:
                         kl_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
-                        loss = recon_loss + self.beta * kl_loss
+                        loss = recon_loss + self.grad_loss_weight * grad_loss + self.beta * kl_loss
                     else:
-                        loss = recon_loss
+                        loss = recon_loss + self.grad_loss_weight * grad_loss
 
                 total_loss += float(loss.detach())
                 total_recon_loss += float(recon_loss.detach())
+                if l1_raw is not None:
+                    total_l1_loss += float(l1_raw.detach())
+                if l2_raw is not None:
+                    total_l2_loss += float(l2_raw.detach())
+                total_grad_loss += float(grad_loss.detach())
                 num_batches += 1
 
                 # 在首个正常 batch 上画图（只在主进程）
@@ -254,15 +305,33 @@ class FSDPUNetTrainer(UNetTrainer):
         else:
             avg_loss, avg_recon = self._all_reduce_loss(total_loss, total_recon_loss, num_batches)
 
+        # 日志项按 mode 输出（这里按本 rank 统计；主进程打印）
+        avg_l1 = total_l1_loss / max(num_batches, 1)
+        avg_l2 = total_l2_loss / max(num_batches, 1)
+        avg_grad = total_grad_loss / max(num_batches, 1)
+
         if self.is_master:
             print(f"\nEpoch {epoch+1} 验证集平均:")
-            # 这里暂时只打印总损失和重建损失，KL 如需可在上面累加并打印
-            print(f"总损失={avg_loss:.5f}, 重建={avg_recon:.5f}")
+            if self.recon_loss_type == "l1":
+                if self.use_grad_loss:
+                    print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}, Gradloss={avg_grad:.5f}")
+                else:
+                    print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}")
+            elif self.recon_loss_type == "l2":
+                if self.use_grad_loss:
+                    print(f"总损失={avg_loss:.5f}, L2loss={avg_l2:.5f}, Gradloss={avg_grad:.5f}")
+                else:
+                    print(f"总损失={avg_loss:.5f}, L2loss={avg_l2:.5f}")
 
             global_step = epoch
             if hasattr(self, "writer") and self.writer:
                 self.writer.add_scalar("Loss/val/total", avg_loss, global_step)
-                self.writer.add_scalar("Loss/val/recon", avg_recon, global_step)
+                if self.recon_loss_type == "l1":
+                    self.writer.add_scalar("Loss/val/L1loss", avg_l1, global_step)
+                else:
+                    self.writer.add_scalar("Loss/val/L2loss", avg_l2, global_step)
+                if self.use_grad_loss:
+                    self.writer.add_scalar("Loss/val/Gradloss", avg_grad, global_step)
 
         return avg_loss
 
@@ -386,6 +455,9 @@ class FSDPUNetTrainer(UNetTrainer):
         self.model.train()
         total_loss = 0.0
         total_recon_loss = 0.0
+        total_l1_loss = 0.0
+        total_l2_loss = 0.0
+        total_grad_loss = 0.0
         total_kl_loss = 0.0
         num_batches = 0
 
@@ -423,14 +495,15 @@ class FSDPUNetTrainer(UNetTrainer):
                     x_recon = self.model(x, times=times)
                     mu = log_var = None
 
-                recon_loss = self.cal_losses(x_recon, y, weight=weights)
+                recon_loss, l1_raw, l2_raw = self._compute_recon_loss_details(x_recon, y, weight=weights)
+                grad_loss = self._compute_grad_loss(x_recon, y) if self.use_grad_loss else torch.tensor(0.0, device=self.device)
 
                 if getattr(self, "using_kl", False) and mu is not None and log_var is not None:
                     kl_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
-                    loss = recon_loss + self.beta * kl_loss
+                    loss = recon_loss + self.grad_loss_weight * grad_loss + self.beta * kl_loss
                 else:
                     kl_loss = torch.tensor(0.0, device=self.device)
-                    loss = recon_loss
+                    loss = recon_loss + self.grad_loss_weight * grad_loss
 
             # 如果 loss 本身出现 NaN/Inf，同样跳过该 batch，避免反向传播污染参数
             if torch.isnan(loss).any() or torch.isinf(loss).any():
@@ -446,6 +519,11 @@ class FSDPUNetTrainer(UNetTrainer):
 
             total_loss += loss_item
             total_recon_loss += recon_item
+            if l1_raw is not None:
+                total_l1_loss += float(l1_raw.detach())
+            if l2_raw is not None:
+                total_l2_loss += float(l2_raw.detach())
+            total_grad_loss += float(grad_loss.detach())
             total_kl_loss += kl_item
             num_batches += 1
 
@@ -463,21 +541,32 @@ class FSDPUNetTrainer(UNetTrainer):
 
             if self.is_master:
                 if getattr(self, "using_kl", False):
-                    pbar.set_postfix({
+                    postfix = {
                         'Loss': f'{loss_item:.4f}',
-                        'Recon': f'{recon_item:.4f}',
+                        ('L1loss' if self.recon_loss_type == 'l1' else 'L2loss'): f'{recon_item:.4f}',
                         'KL': f'{kl_item:.4f}',
-                    })
+                    }
+                    if self.use_grad_loss:
+                        postfix['Grad'] = f'{float(grad_loss.detach()):.4f}'
+                    pbar.set_postfix(postfix)
                 else:
-                    pbar.set_postfix({
+                    postfix = {
                         'Loss': f'{loss_item:.4f}',
-                        'Recon': f'{recon_item:.4f}',
-                    })
+                        ('L1loss' if self.recon_loss_type == 'l1' else 'L2loss'): f'{recon_item:.4f}',
+                    }
+                    if self.use_grad_loss:
+                        postfix['Grad'] = f'{float(grad_loss.detach()):.4f}'
+                    pbar.set_postfix(postfix)
 
                 if batch_idx % 10 == 0 and hasattr(self, 'writer') and self.writer:
                     step = epoch * len(self.trainlo) + batch_idx
                     self.writer.add_scalar("Loss/batch/total", loss_item, step)
-                    self.writer.add_scalar("Loss/batch/recon", recon_item, step)
+                    if self.recon_loss_type == "l1":
+                        self.writer.add_scalar("Loss/batch/L1loss", float(l1_raw.detach()) if l1_raw is not None else recon_item, step)
+                    else:
+                        self.writer.add_scalar("Loss/batch/L2loss", float(l2_raw.detach()) if l2_raw is not None else recon_item, step)
+                    if self.use_grad_loss:
+                        self.writer.add_scalar("Loss/batch/Gradloss", float(grad_loss.detach()), step)
                     if getattr(self, "using_kl", False):
                         self.writer.add_scalar("Loss/batch/kl", kl_item, step)
 
@@ -490,6 +579,10 @@ class FSDPUNetTrainer(UNetTrainer):
         else:
             avg_loss, avg_recon = self._all_reduce_loss(total_loss, total_recon_loss, num_batches)
 
+        avg_l1 = total_l1_loss / max(num_batches, 1)
+        avg_l2 = total_l2_loss / max(num_batches, 1)
+        avg_grad = total_grad_loss / max(num_batches, 1)
+
         # 验证也返回全局损失
         val_loss = self.validate_one_epoch(epoch)
 
@@ -501,12 +594,26 @@ class FSDPUNetTrainer(UNetTrainer):
 
         if self.is_master:
             print(f"\nEpoch {epoch+1} 训练集平均:")
-            print(f"总损失={avg_loss:.5f}, 重建={avg_recon:.5f}")
+            if self.recon_loss_type == "l1":
+                if self.use_grad_loss:
+                    print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}, Gradloss={avg_grad:.5f}")
+                else:
+                    print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}")
+            else:
+                if self.use_grad_loss:
+                    print(f"总损失={avg_loss:.5f}, L2loss={avg_l2:.5f}, Gradloss={avg_grad:.5f}")
+                else:
+                    print(f"总损失={avg_loss:.5f}, L2loss={avg_l2:.5f}")
 
             global_step = epoch
             if hasattr(self, 'writer') and self.writer:
                 self.writer.add_scalar("Loss/train/total",    avg_loss,  global_step)
-                self.writer.add_scalar("Loss/train/recon",    avg_recon, global_step)
+                if self.recon_loss_type == "l1":
+                    self.writer.add_scalar("Loss/train/L1loss", avg_l1, global_step)
+                else:
+                    self.writer.add_scalar("Loss/train/L2loss", avg_l2, global_step)
+                if self.use_grad_loss:
+                    self.writer.add_scalar("Loss/train/Gradloss", avg_grad, global_step)
                 # 当使用 KL 且启用 KL annealing 时，记录当前 beta
                 if getattr(self, "using_kl", False) and getattr(self, "kl_anneal", False):
                     self.writer.add_scalar("hyper/beta",      self.beta, global_step)
