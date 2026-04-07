@@ -7,11 +7,11 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+
 from data.pairset import GFS2ERA5Dataset
 from models.swinUNET import G2E
 from trainers.fsdptrain import FSDPUNetTrainer
-
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 import numpy as np
 import pandas as pd
 import multiprocessing as mp
@@ -80,10 +80,7 @@ def main():
     # 重建损失配置：
     # - "l2"    : 仅 MSE（默认）
     # - "l1"    : 仅 L1
-    # gradloss 为可选项，最终 loss = recon + grad_loss_weight * gradloss (+ 可选 KL)
     recon_loss_type = "l1"
-    use_grad_loss = True
-    grad_loss_weight = 0.4
 
     # 1) 训练集：使用 2022-2024，全量样本，来自 2020-2024 标准化 GFS Zarr
     train_set = GFS2ERA5Dataset(
@@ -92,7 +89,7 @@ def main():
         x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized",
         # max_samples_per_year 可在调参时设成一个较小的数，例如 500 或 1000，快速训练
         # 正式训练时设为 None 即可使用全量数据
-        max_samples_per_year=None,
+        max_samples_per_year=490,
         sample_seed = data_sample_seed,
     )
 
@@ -200,18 +197,16 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-4,  # KL 目标权重，如未使用 KL 可设为 0
-        tb_dir="/home/ximutian/tensorboard_logs/swinunetL1+GRAD_2022_2024_3yr_4_6",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunetL1+GRAD_2022_2024_3yr_4_6",
+        tb_dir="/home/ximutian/tensorboard_logs/swinunetL1_2022_2024_1yr_4_2",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunetL1_2022_2024_1yr_4_2",
         save_interval=1,
-        use_amp=False,
+        use_amp=True,
         rank=rank,
         world_size=world_size,
         kl_anneal=False,           # 启用 KL annealing
         kl_anneal_epochs=7,      # 前 10 个 epoch 从 0 线性涨到 beta
-        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunetL1+GRAD_2022_2024_3yr_4_6",
-        recon_loss_type=recon_loss_type,
-        use_grad_loss=use_grad_loss,
-        grad_loss_weight=grad_loss_weight,
+        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunetL1_2022_2024_1yr_4_2",
+        recon_loss_type=recon_loss_type
     )
 
     trainer.train(
