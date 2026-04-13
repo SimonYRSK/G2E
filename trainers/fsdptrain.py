@@ -5,6 +5,7 @@ import pandas as pd
 import xarray as xr
 import torch
 import torch.distributed as dist
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -44,15 +45,21 @@ class FSDPUNetTrainer(UNetTrainer):
         recon_loss_type: str = "l2",
         use_grad_loss: bool = False,
         grad_loss_weight: float = 0.0,
+        l1_reg_weight: float = 0.0,
+        l2_reg_weight: float = 0.0,
+        charbonnier_eps: float = 1e-3,
     ):
         self.rank = rank
         self.world_size = world_size
         self.is_master = (rank == 0) if is_master is None else is_master
         self.recon_loss_type = str(recon_loss_type).lower()
-        if self.recon_loss_type not in {"l1", "l2"}:
-            raise ValueError(f"recon_loss_type must be one of ['l1','l2'], got: {recon_loss_type}")
+        if self.recon_loss_type not in {"l1", "l2", "charbonnier"}:
+            raise ValueError(f"recon_loss_type must be one of ['l1','l2','charbonnier'], got: {recon_loss_type}")
         self.use_grad_loss = bool(use_grad_loss)
         self.grad_loss_weight = float(grad_loss_weight)
+        self.l1_reg_weight = float(l1_reg_weight)
+        self.l2_reg_weight = float(l2_reg_weight)
+        self.charbonnier_eps = float(charbonnier_eps)
 
         # 对 FSDP 包裹的模型，同步内外层的 using_kl 标志，
         # 确保 Trainer 在分布式场景下也能正确识别是否启用 KL
@@ -89,6 +96,11 @@ class FSDPUNetTrainer(UNetTrainer):
                 f"[FSDPUNetTrainer] recon_loss_type = {self.recon_loss_type}, "
                 f"use_grad_loss = {self.use_grad_loss}, grad_loss_weight = {self.grad_loss_weight}"
             )
+            if self.l1_reg_weight > 0 or self.l2_reg_weight > 0:
+                print(
+                    f"[FSDPUNetTrainer] l1_reg_weight = {self.l1_reg_weight}, "
+                    f"l2_reg_weight = {self.l2_reg_weight}"
+                )
 
         # 非主进程关闭 TensorBoard，避免多进程同时写
         if not self.is_master and hasattr(self, "writer") and self.writer is not None:
@@ -201,7 +213,7 @@ class FSDPUNetTrainer(UNetTrainer):
         return avg_loss, avg_recon
 
     def _compute_recon_loss_details(self, pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor | None = None):
-        """返回 (recon_loss, l1_raw, l2_raw)。仅二选一作为 recon。"""
+        """返回 (recon_loss, l1_raw, l2_raw)。recon 可为 L1/L2/Charbonnier。"""
         l1_raw = None
         l2_raw = None
 
@@ -212,6 +224,14 @@ class FSDPUNetTrainer(UNetTrainer):
             else:
                 l1_raw = torch.mean(abs_err)
             recon_loss = l1_raw
+        elif self.recon_loss_type == "charbonnier":
+            diff = pred - target
+            eps2 = self.charbonnier_eps * self.charbonnier_eps
+            charbonnier = torch.sqrt(diff * diff + eps2)
+            if weight is not None:
+                recon_loss = torch.mean(charbonnier * weight.float())
+            else:
+                recon_loss = torch.mean(charbonnier)
         else:
             l2_raw = self.cal_losses(pred, target, weight=weight)
             recon_loss = l2_raw
@@ -229,6 +249,24 @@ class FSDPUNetTrainer(UNetTrainer):
         loss_dx = torch.mean(torch.abs(pred_dx - tgt_dx))
         loss_dy = torch.mean(torch.abs(pred_dy - tgt_dy))
         return 0.5 * (loss_dx + loss_dy)
+
+    def _compute_reg_loss(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """计算 L1/L2 正则项（可选）。"""
+        if (self.l1_reg_weight <= 0) and (self.l2_reg_weight <= 0):
+            zero = torch.tensor(0.0, device=self.device)
+            return zero, zero
+
+        l1_reg = torch.tensor(0.0, device=self.device)
+        l2_reg = torch.tensor(0.0, device=self.device)
+        for p in self.model.parameters():
+            if not p.requires_grad:
+                continue
+            if self.l1_reg_weight > 0:
+                l1_reg = l1_reg + p.abs().sum()
+            if self.l2_reg_weight > 0:
+                l2_reg = l2_reg + p.pow(2).sum()
+
+        return l1_reg, l2_reg
 
     def validate_one_epoch(self, epoch):
         self.model.eval()
@@ -317,6 +355,11 @@ class FSDPUNetTrainer(UNetTrainer):
                     print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}, Gradloss={avg_grad:.5f}")
                 else:
                     print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}")
+            elif self.recon_loss_type == "charbonnier":
+                if self.use_grad_loss:
+                    print(f"总损失={avg_loss:.5f}, Charbonnierloss={avg_recon:.5f}, Gradloss={avg_grad:.5f}")
+                else:
+                    print(f"总损失={avg_loss:.5f}, Charbonnierloss={avg_recon:.5f}")
             elif self.recon_loss_type == "l2":
                 if self.use_grad_loss:
                     print(f"总损失={avg_loss:.5f}, L2loss={avg_l2:.5f}, Gradloss={avg_grad:.5f}")
@@ -328,6 +371,8 @@ class FSDPUNetTrainer(UNetTrainer):
                 self.writer.add_scalar("Loss/val/total", avg_loss, global_step)
                 if self.recon_loss_type == "l1":
                     self.writer.add_scalar("Loss/val/L1loss", avg_l1, global_step)
+                elif self.recon_loss_type == "charbonnier":
+                    self.writer.add_scalar("Loss/val/Charbonnierloss", avg_recon, global_step)
                 else:
                     self.writer.add_scalar("Loss/val/L2loss", avg_l2, global_step)
                 if self.use_grad_loss:
@@ -540,10 +585,11 @@ class FSDPUNetTrainer(UNetTrainer):
             self.scaler.update()
 
             if self.is_master:
+                recon_name = "L1loss" if self.recon_loss_type == "l1" else ("L2loss" if self.recon_loss_type == "l2" else "Charbonnierloss")
                 if getattr(self, "using_kl", False):
                     postfix = {
                         'Loss': f'{loss_item:.4f}',
-                        ('L1loss' if self.recon_loss_type == 'l1' else 'L2loss'): f'{recon_item:.4f}',
+                        recon_name: f'{recon_item:.4f}',
                         'KL': f'{kl_item:.4f}',
                     }
                     if self.use_grad_loss:
@@ -552,7 +598,7 @@ class FSDPUNetTrainer(UNetTrainer):
                 else:
                     postfix = {
                         'Loss': f'{loss_item:.4f}',
-                        ('L1loss' if self.recon_loss_type == 'l1' else 'L2loss'): f'{recon_item:.4f}',
+                        recon_name: f'{recon_item:.4f}',
                     }
                     if self.use_grad_loss:
                         postfix['Grad'] = f'{float(grad_loss.detach()):.4f}'
@@ -563,6 +609,8 @@ class FSDPUNetTrainer(UNetTrainer):
                     self.writer.add_scalar("Loss/batch/total", loss_item, step)
                     if self.recon_loss_type == "l1":
                         self.writer.add_scalar("Loss/batch/L1loss", float(l1_raw.detach()) if l1_raw is not None else recon_item, step)
+                    elif self.recon_loss_type == "charbonnier":
+                        self.writer.add_scalar("Loss/batch/Charbonnierloss", recon_item, step)
                     else:
                         self.writer.add_scalar("Loss/batch/L2loss", float(l2_raw.detach()) if l2_raw is not None else recon_item, step)
                     if self.use_grad_loss:
@@ -599,6 +647,11 @@ class FSDPUNetTrainer(UNetTrainer):
                     print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}, Gradloss={avg_grad:.5f}")
                 else:
                     print(f"总损失={avg_loss:.5f}, L1loss={avg_l1:.5f}")
+            elif self.recon_loss_type == "charbonnier":
+                if self.use_grad_loss:
+                    print(f"总损失={avg_loss:.5f}, Charbonnierloss={avg_recon:.5f}, Gradloss={avg_grad:.5f}")
+                else:
+                    print(f"总损失={avg_loss:.5f}, Charbonnierloss={avg_recon:.5f}")
             else:
                 if self.use_grad_loss:
                     print(f"总损失={avg_loss:.5f}, L2loss={avg_l2:.5f}, Gradloss={avg_grad:.5f}")
@@ -610,6 +663,8 @@ class FSDPUNetTrainer(UNetTrainer):
                 self.writer.add_scalar("Loss/train/total",    avg_loss,  global_step)
                 if self.recon_loss_type == "l1":
                     self.writer.add_scalar("Loss/train/L1loss", avg_l1, global_step)
+                elif self.recon_loss_type == "charbonnier":
+                    self.writer.add_scalar("Loss/train/Charbonnierloss", avg_recon, global_step)
                 else:
                     self.writer.add_scalar("Loss/train/L2loss", avg_l2, global_step)
                 if self.use_grad_loss:

@@ -12,7 +12,7 @@ def run_step(cmd, title):
 
 def main():
     parser = argparse.ArgumentParser(description="Batch pipeline: inference -> replace -> infer_onnx -> metrics")
-    parser.add_argument("--model_tag", type=str, default="3yr_L1+Gradloss", choices=["3yr_L2", "1yr_L2", "1yr_L1+Gradloss", "3yr_L1+Gradloss"])
+    parser.add_argument("--model_tag", type=str, default="3yr_L1+Gradloss_diff", choices=["3yr_L2", "1yr_L2", "1yr_L1+Gradloss", "3yr_L1+Gradloss","3yr_L2_NS","3yr_Charbonnier", "3yr_L1+Gradloss_SS", "3yr_L1+Gradloss_diff"])
     parser.add_argument(
         "--dates",
         type=str,
@@ -21,10 +21,13 @@ def main():
     )
     parser.add_argument("--device", type=str, default="cuda")
 
-    parser.add_argument("--checkpoint_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunetL1+GRAD_2022_2024_3yr_4_3/checkpoint_epoch_32.pth")
-    parser.add_argument("--model_suffix", type=str, default="4_3")
-    parser.add_argument("--x_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized")
-    parser.add_argument("--gfs_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized")
+    parser.add_argument("--checkpoint_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_diff_3yr_4_10/checkpoint_epoch_120.pth")
+    parser.add_argument("--model_suffix", type=str, default="4_10")
+    parser.add_argument("--x_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2022_2025_c70_normalized")
+    parser.add_argument("--gfs_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2022_2025_c70_normalized")
+
+    # parser.add_argument("--x_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized")
+    # parser.add_argument("--gfs_path", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized")
 
     parser.add_argument("--inference_root", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/inferenced")
     parser.add_argument("--localreplaced_root", type=str, default="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/localreplaced/with_trans_gfs")

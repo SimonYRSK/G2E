@@ -146,16 +146,18 @@ class PatchEmbedding(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, num_groups, ch):
+    def __init__(self, num_groups, ch, dropout_rate: float = 0.0):
         super().__init__()
         self.conv1 = nn.Conv2d(ch, ch, 3, padding=1)
         self.norm1 = nn.GroupNorm(num_groups, ch)
         self.act = nn.SiLU()
+        self.dropout = nn.Dropout2d(dropout_rate) if dropout_rate and dropout_rate > 0 else nn.Identity()
         self.conv2 = nn.Conv2d(ch, ch, 3, padding=1)
         self.norm2 = nn.GroupNorm(num_groups, ch)
 
     def forward(self, x):
         h = self.act(self.norm1(self.conv1(x)))
+        h = self.dropout(h)
         h = self.norm2(self.conv2(h))
         return self.act(h + x)
         
@@ -200,10 +202,13 @@ class UNetEncoder(nn.Module):
         using_checkpoints: bool = True,
         res_per_stage=None,
         dims=None,
+        dropout_rate: float = 0.0,
+        use_residual_blocks: bool = True,
     ):
         super().__init__()
         self.num_stages = num_stages
         self.using_checkpoints = using_checkpoints
+        self.use_residual_blocks = use_residual_blocks
 
         window_size = to_2tuple(window_size)
 
@@ -250,9 +255,12 @@ class UNetEncoder(nn.Module):
 
         for i in range(num_stages):
             ch = self.dims[i]
-            stage_res_blocks = nn.ModuleList(
-                [ResBlock(num_groups, ch) for _ in range(self.res_per_stage[i])]
-            )
+            if self.use_residual_blocks:
+                stage_res_blocks = nn.ModuleList(
+                    [ResBlock(num_groups, ch, dropout_rate=dropout_rate) for _ in range(self.res_per_stage[i])]
+                )
+            else:
+                stage_res_blocks = nn.ModuleList([])
             self.res_blocks.append(stage_res_blocks)
 
             input_reso = self.stage_resolutions[i]
@@ -309,10 +317,23 @@ class UNetEncoder(nn.Module):
 class UNetDecoder(nn.Module):
     """UNet 解码端：逐级上采样并与 encoder skip 拼接，再经 CNN。"""
 
-    def __init__(self, dim, num_groups, num_stages, output_reso, using_checkpoints: bool = True, dims=None):
+    def __init__(
+        self,
+        dim,
+        num_groups,
+        num_stages,
+        output_reso,
+        using_checkpoints: bool = True,
+        dims=None,
+        dropout_rate: float = 0.0,
+        use_skip_connections: bool = True,
+        use_residual_blocks: bool = True,
+    ):
         super().__init__()
         self.num_stages = num_stages
         self.using_checkpoints = using_checkpoints
+        self.use_skip_connections = use_skip_connections
+        self.use_residual_blocks = use_residual_blocks
 
         base_h, base_w = output_reso
         self.stage_resolutions = []
@@ -344,15 +365,20 @@ class UNetDecoder(nn.Module):
             self.up_blocks.append(Upblock(in_ch, out_ch, out_size))
 
             # concat 之后通道数为 2*dim，先用一个 Conv+GN+SiLU 压回 dim 通道
-            self.reduce_blocks.append(
-                nn.Sequential(
-                    nn.Conv2d(out_ch * 2, out_ch, kernel_size=3, padding=1),
-                    nn.GroupNorm(num_groups, out_ch),
-                    nn.SiLU(),
-                )
-            )
+            reduce_in_ch = out_ch * 2 if self.use_skip_connections else out_ch
+            reduce_layers = [
+                nn.Conv2d(reduce_in_ch, out_ch, kernel_size=3, padding=1),
+                nn.GroupNorm(num_groups, out_ch),
+                nn.SiLU(),
+            ]
+            if dropout_rate and dropout_rate > 0:
+                reduce_layers.append(nn.Dropout2d(dropout_rate))
+            self.reduce_blocks.append(nn.Sequential(*reduce_layers))
             # 再接一个 ResBlock(dim)
-            self.res_blocks.append(ResBlock(num_groups, out_ch))
+            if self.use_residual_blocks:
+                self.res_blocks.append(ResBlock(num_groups, out_ch, dropout_rate=dropout_rate))
+            else:
+                self.res_blocks.append(nn.Identity())
 
     def forward(self, x, skips):
         # skips: 长度 num_stages，其中最后一个是 bottleneck 尺度
@@ -360,7 +386,8 @@ class UNetDecoder(nn.Module):
         for idx, (up, reduce, res) in enumerate(zip(self.up_blocks, self.reduce_blocks, self.res_blocks)):
             i = self.num_stages - 2 - idx
             h = up(h)
-            h = torch.cat([h, skips[i]], dim=1)  # [B, 2*dim, H, W]
+            if self.use_skip_connections and skips is not None:
+                h = torch.cat([h, skips[i]], dim=1)  # [B, 2*dim, H, W]
             h = reduce(h)  # [B, dim, H, W]
             if self.using_checkpoints:
                 h = checkpoint.checkpoint(res, h, use_reentrant=False)
@@ -391,6 +418,9 @@ class UNet(nn.Module):
         res_per_stage=None,
         dims=None,
         using_kl: bool = False,
+        dropout_rate: float = 0.0,
+        use_skip_connections: bool = True,
+        use_residual_blocks: bool = True,
         **kwargs,
     ):
         super().__init__()
@@ -416,6 +446,8 @@ class UNet(nn.Module):
             using_checkpoints=using_checkpoints,
             res_per_stage=res_per_stage,
             dims=dims,
+            dropout_rate=dropout_rate,
+            use_residual_blocks=use_residual_blocks,
         )
 
         self.decoder = UNetDecoder(
@@ -425,6 +457,9 @@ class UNet(nn.Module):
             output_reso,
             using_checkpoints=using_checkpoints,
             dims=dims,
+            dropout_rate=dropout_rate,
+            use_skip_connections=use_skip_connections,
+            use_residual_blocks=use_residual_blocks,
         )
 
         # 瓶颈 VAE 的 mu / log_var 头，只在 using_kl 时创建
@@ -499,6 +534,9 @@ class G2E(nn.Module):
         res_per_stage = [1, 2, 4],
         channels=None,
         using_kl: bool = False,
+        dropout_rate: float = 0.0,
+        use_skip_connections: bool = True,
+        use_residual_blocks: bool = True,
         **kwargs
 
     ):
@@ -542,6 +580,9 @@ class G2E(nn.Module):
             res_per_stage,
             dims=self.dims,
             using_kl=self.using_kl,
+            dropout_rate=dropout_rate,
+            use_skip_connections=use_skip_connections,
+            use_residual_blocks=use_residual_blocks,
         )
         
         # PatchHead 的输入通道与最高分辨率的通道数相同

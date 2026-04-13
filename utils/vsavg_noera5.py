@@ -90,7 +90,7 @@ def plot_curve(avg_by_tag, output_dir, metric="acc", num_steps=None, title_suffi
     if len(avg_by_tag) == 0:
         raise RuntimeError("没有可绘制的 tag 数据")
 
-    # 以第一个 tag 作为步长与 Naive ERA5 参考
+    # 以第一个 tag 作为步长参考
     first_tag = next(iter(avg_by_tag))
     ref = _truncate_series(avg_by_tag[first_tag], num_steps=num_steps)
     steps = ref["steps"]
@@ -109,9 +109,8 @@ def plot_curve(avg_by_tag, output_dir, metric="acc", num_steps=None, title_suffi
         "tab:cyan",
     ]
 
-    # 保留 Naive ERA5 基线（去掉 Naive GFS）
+    # 仅绘制 --tags 中的模型曲线
     if metric == "acc":
-        plt.plot(steps, ref["acc_era5"], label="Naive ERA5", marker="o", color="gray")
         for idx, (tag, data) in enumerate(avg_by_tag.items()):
             d = _truncate_series(data, num_steps=num_steps)
             if len(d["steps"]) != len(steps):
@@ -122,7 +121,7 @@ def plot_curve(avg_by_tag, output_dir, metric="acc", num_steps=None, title_suffi
         plt.xlabel("Forecast Step")
         plt.ylabel("ACC")
         plt.title(f"平均ACC ({title_suffix})")
-        plt.ylim(0.34, 1.00)
+        plt.ylim(0.98, 1.00)
         plt.legend()
         plt.grid()
         plt.tight_layout()
@@ -130,7 +129,6 @@ def plot_curve(avg_by_tag, output_dir, metric="acc", num_steps=None, title_suffi
         plt.close()
 
     elif metric == "rmse":
-        plt.plot(steps, ref["rmse_era5"], label="Naive ERA5", marker="o", color="gray")
         for idx, (tag, data) in enumerate(avg_by_tag.items()):
             d = _truncate_series(data, num_steps=num_steps)
             if len(d["steps"]) != len(steps):
@@ -141,7 +139,7 @@ def plot_curve(avg_by_tag, output_dir, metric="acc", num_steps=None, title_suffi
         plt.xlabel("Forecast Step")
         plt.ylabel("RMSE")
         plt.title(f"平均RMSE ({title_suffix})")
-        plt.ylim(40, 1000)
+        plt.ylim(50, 160)
         plt.legend()
         plt.grid()
         plt.tight_layout()
@@ -156,7 +154,7 @@ def main():
         type=str,
         nargs="+",
         default=["3yr", "3yr_L1+Gradloss", "3yr_L2_NS", "3yr_Charbonnier"],
-        help="要对比的模型 tag 列表，例如: 3yr_L2_NS 3yr_charbonnier",
+        help="要对比的模型 tag 列表，例如: 3yr_L2_NS 3yr_Charbonnier",
     )
     parser.add_argument(
         "--dates",
@@ -164,7 +162,7 @@ def main():
         nargs="+",
         default=["20250101", "20250115", "20250131", "20250214", "20250301", "20250315", "20250331", "20250501", "20250515", "20250601"],
     )
-    parser.add_argument("--num_steps", type=int, default=40, help="只绘制前 N 个 forecast step")
+    parser.add_argument("--num_steps", type=int, default=8, help="只绘制前 N 个 forecast step")
     parser.add_argument("--title_suffix", type=str, default="z500", help="图标题后缀")
     parser.add_argument("--output_dir", type=str, default=None)
     args = parser.parse_args()

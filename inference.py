@@ -24,6 +24,43 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
     print("load G2E")
 
     # 与训练 mainfsdp.py 中一致的 SwinUNet 配置
+    # model = G2E(
+    #     img_size=(721, 1440),
+    #     patch_size=(4, 4),
+    #     in_chans=70,
+    #     out_chans=70,
+    #     embed_dim=384,
+    #     num_groups=32,
+    #     num_heads=8,
+    #     num_stages=3,
+    #     window_size=9,
+    #     depth=[0, 0, 1],
+    #     using_checkpoints=True,
+    #     using_time_embedding=True,
+    #     res_per_stage=[1, 1, 1],
+    #     channels=[384, 768, 1536],
+    #     using_kl=False,
+    # )
+
+    # model = G2E(
+    #     img_size=(721, 1440),
+    #     patch_size=(2, 2),
+    #     in_chans=70,
+    #     out_chans=70,
+    #     embed_dim=256,
+    #     num_groups=32,
+    #     num_heads=8,
+    #     num_stages=3,
+    #     window_size=9,
+    #     depth=[1, 1, 2],
+    #     using_checkpoints=True,
+    #     using_time_embedding=True,
+    #     res_per_stage=[1, 1, 1],
+    #     channels=[256, 512, 1024],
+    #     using_kl=False,
+    # )
+
+
     model = G2E(
         img_size=(721, 1440),
         patch_size=(4, 4),
@@ -40,6 +77,9 @@ def inference(checkpoint_path, device, save_path, test_loader, gfs_path = "/cpfs
         res_per_stage=[1, 1, 1],
         channels=[384, 768, 1536],
         using_kl=False,
+        dropout_rate=0.1,
+        use_skip_connections=False,
+        use_residual_blocks=False,
     )
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
