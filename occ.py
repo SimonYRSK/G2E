@@ -65,7 +65,7 @@ def custom_collate(batch):
 
 def main():
     if "RANK" not in os.environ:
-        raise RuntimeError("mainfsdp.py 需要通过 torchrun 启动，例如: torchrun --nproc_per_node=2 mainfsdp.py")
+        raise RuntimeError("mainfsdp.py 需要通过 torchrun 启动，例如: torchrun --nproc_per_node=2 mainvae.py")
 
     device, rank, world_size = setup_distributed()
     is_master = (rank == 0)
@@ -80,16 +80,27 @@ def main():
     # 重建损失配置：
     # - "l2"    : 仅 MSE（默认）
     # - "l1"    : 仅 L1
+    # - "charbonnier" : Charbonnier（平滑 L1）
     # gradloss 为可选项，最终 loss = recon + grad_loss_weight * gradloss (+ 可选 KL)
     recon_loss_type = "l1"
+    charbonnier_eps = 1e-3
     use_grad_loss = True
     grad_loss_weight = 0.4
 
+    # 正则与 dropout（可根据验证集调整）
+    dropout_rate = 0.1
+    l1_reg_weight = 0.0
+    l2_reg_weight = 0.0
+
+    # VAE 结构实验：仅保留编码器-解码器主干，关闭残差块与 U-Net 跳连
+    use_skip_connections = True
+    use_residual_blocks = True
+
     # 1) 训练集：使用 2022-2024，全量样本，来自 2020-2024 标准化 GFS Zarr
     train_set = GFS2ERA5Dataset(
-        start="2022-01-01 00:00:00",
+        start="2020-01-01 00:00:00",
         end="2024-12-31 18:00:00",
-        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized",
+        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2020_2025_c226_normalized",
         # max_samples_per_year 可在调参时设成一个较小的数，例如 500 或 1000，快速训练
         # 正式训练时设为 None 即可使用全量数据
         max_samples_per_year=None,
@@ -100,8 +111,8 @@ def main():
     val_set = GFS2ERA5Dataset(
         start="2025-01-01 00:00:00",
         end="2025-11-20 18:00:00",
-        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized",
-        val_sample_per_month=1,
+        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2020_2025_c226_normalized",
+        val_sample_per_month=4,
         val_sample_year=2025,
         sample_seed = data_sample_seed,
     )
@@ -149,6 +160,9 @@ def main():
         res_per_stage=[1, 1, 1],
         channels=[384, 768, 1536],
         using_kl=False,
+        dropout_rate=dropout_rate,
+        use_skip_connections=use_skip_connections,
+        use_residual_blocks=use_residual_blocks,
     )
 
     if is_master:
@@ -159,7 +173,7 @@ def main():
     # 用 FSDP 包裹模型
     model = FSDP(base_model, device_id=device)
 
-    num_epochs = 120
+    num_epochs = 200
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -200,18 +214,21 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-4,  # KL 目标权重，如未使用 KL 可设为 0
-        tb_dir="/home/ximutian/tensorboard_logs/swinunetL1+GRAD_2022_2024_3yr_4_6",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunetL1+GRAD_2022_2024_3yr_4_6",
-        save_interval=1,
+        tb_dir="/home/ximutian/tensorboard_logs/occ",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/occ",
+        save_interval=200,
         use_amp=False,
         rank=rank,
         world_size=world_size,
         kl_anneal=False,           # 启用 KL annealing
         kl_anneal_epochs=7,      # 前 10 个 epoch 从 0 线性涨到 beta
-        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunetL1+GRAD_2022_2024_3yr_4_6",
+        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/occ",
         recon_loss_type=recon_loss_type,
+        charbonnier_eps=charbonnier_eps,
         use_grad_loss=use_grad_loss,
         grad_loss_weight=grad_loss_weight,
+        l1_reg_weight=l1_reg_weight,
+        l2_reg_weight=l2_reg_weight,
     )
 
     trainer.train(

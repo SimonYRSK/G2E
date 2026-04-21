@@ -5,13 +5,12 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 
 from data.pairset import GFS2ERA5Dataset
 from models.swinUNET import G2E
-from models.gan import PatchDiscriminator
-from trainers.fsdpgan import FSDPGANTrainer
+from trainers.fsdptrain_diff import FSDPUNetTrainerDiff
 
 import numpy as np
 import pandas as pd
@@ -19,7 +18,7 @@ import multiprocessing as mp
 
 
 try:
-    mp.set_start_method("spawn", force=True)
+    mp.set_start_method('spawn', force=True)
 except RuntimeError:
     pass
 
@@ -34,9 +33,12 @@ def set_random_seed(seed: int):
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
 def setup_distributed():
+    """初始化单机多卡分布式环境，返回 device, rank, world_size。"""
     if not dist.is_initialized():
         backend = "nccl" if torch.cuda.is_available() and os.name != "nt" else "gloo"
         dist.init_process_group(backend=backend)
@@ -62,35 +64,54 @@ def custom_collate(batch):
 
 def main():
     if "RANK" not in os.environ:
-        raise RuntimeError("mainfsdpgan.py 需要通过 torchrun 启动，例如: torchrun --nproc_per_node=2 maingan.py")
+        raise RuntimeError("mainfsdp_diff.py 需要通过 torchrun 启动，例如: torchrun --nproc_per_node=2 mainfsdp_diff.py")
 
     device, rank, world_size = setup_distributed()
-    is_master = rank == 0
+    is_master = (rank == 0)
 
     if is_master:
         print(f"World size = {world_size}, rank = {rank}, device = {device}")
 
     set_random_seed(42)
+
     data_sample_seed = 43
 
-    # 与 baseline 一致：直接拟合 ERA5
+    # 重建损失配置（在 diff 模式下，统一在 ERA5 空间比较：diff_pred + gfs vs era5）
+    recon_loss_type = "l1"
+    charbonnier_eps = 1e-3
+    use_grad_loss = True
+    grad_loss_weight = 0.4
+
+    # 正则与 dropout（与 mainl1grad 风格统一）
+    dropout_rate = 0.1
+    l1_reg_weight = 0.0
+    l2_reg_weight = 0.0
+
+    # 结构开关
+    use_skip_connections = True
+    use_residual_blocks = True
+
+    # 1) 训练集：目标为 ERA5-GFS 差值
     train_set = GFS2ERA5Dataset(
         start="2022-01-01 00:00:00",
         end="2024-12-31 18:00:00",
-        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/database/gfs_2020_2024_c70_normalized",
-        max_samples_per_year=490,
-        sample_seed=data_sample_seed,
-        target_mode="era5",
+        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2022_2025_c70_normalized",
+        # max_samples_per_year 可在调参时设成一个较小的数，例如 500 或 1000，快速训练
+        # 正式训练时设为 None 即可使用全量数据
+        max_samples_per_year=None,
+        sample_seed = data_sample_seed,
+        target_mode="diff",
     )
 
+    # 2) 验证集：使用 2025 年数据，按原逻辑在 2025 年每个月随机抽取若干“整天”的所有时间步
     val_set = GFS2ERA5Dataset(
         start="2025-01-01 00:00:00",
         end="2025-11-20 18:00:00",
-        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2025_c70_normalized",
-        val_sample_per_month=1,
+        x_path="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/gfs_2022_2025_c70_normalized",
+        val_sample_per_month=4,
         val_sample_year=2025,
-        sample_seed=data_sample_seed,
-        target_mode="era5",
+        sample_seed = data_sample_seed,
+        target_mode="diff",
     )
 
     train_sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True)
@@ -136,17 +157,20 @@ def main():
         res_per_stage=[1, 1, 1],
         channels=[384, 768, 1536],
         using_kl=False,
+        dropout_rate=dropout_rate,
+        use_skip_connections=use_skip_connections,
+        use_residual_blocks=use_residual_blocks,
     )
 
     if is_master:
         print(f"模型参数量: {sum(p.numel() for p in base_model.parameters()) / 1e6:.2f} M")
 
     base_model.to(device)
+
     model = FSDP(base_model, device_id=device)
 
-    discriminator = PatchDiscriminator(in_x_chans=70, in_y_chans=70, base_channels=64)
+    num_epochs = 120
 
-    num_epochs = 50
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=1e-4,
@@ -154,26 +178,29 @@ def main():
         betas=(0.9, 0.999),
     )
 
-    d_optimizer = torch.optim.Adam(
-        discriminator.parameters(),
-        lr=2e-4,
-        betas=(0.5, 0.999),
-    )
+    min_lr = 5e-7
 
-    scheduler = ReduceLROnPlateau(
+    # 使用 warmup + 余弦退火学习率调度器（按 epoch 进行 step）
+    warmup_epochs = 5
+    warmup_scheduler = LinearLR(
         optimizer,
-        mode="min",
-        factor=0.5,
-        patience=3,
-        threshold=1e-4,
-        min_lr=5e-7,
-        verbose=(rank == 0),
+        start_factor=0.1,
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=max(num_epochs - warmup_epochs, 1),
+        eta_min=min_lr,
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs],
     )
 
-    trainer = FSDPGANTrainer(
+    trainer = FSDPUNetTrainerDiff(
         model=model,
-        discriminator=discriminator,
-        d_optimizer=d_optimizer,
         train_loader=train_loader,
         val_loader=val_loader,
         optimizer=optimizer,
@@ -181,27 +208,31 @@ def main():
         epochs=num_epochs,
         device=device,
         beta=1e-4,
-        tb_dir="/home/ximutian/tensorboard_logs/swinunet_gan_2022_2024",
-        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_gan_2022_2024",
+        tb_dir="/home/ximutian/tensorboard_logs/swinunet_diff_3yr_4_15",
+        save_dir="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/checkpoints/swinunet_diff_3yr_4_15",
         save_interval=1,
-        use_amp=True,
+        use_amp=False,
         rank=rank,
         world_size=world_size,
         kl_anneal=False,
         kl_anneal_epochs=7,
-        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_gan_2022_2024",
-        gan_start_epoch=35,
-        l1_weight=10.0,
-        adv_weight=1.0,
-        fm_weight=5.0,
-        d_grad_clip=5.0,
+        plot_root="/cpfs01/projects-HDD/cfff-4a8d9af84f66_HDD/public/MutianXi/G2E/channelpics/swinunet_diff_3yr_4_15",
+        recon_loss_type=recon_loss_type,
+        charbonnier_eps=charbonnier_eps,
+        use_grad_loss=use_grad_loss,
+        grad_loss_weight=grad_loss_weight,
+        l1_reg_weight=l1_reg_weight,
+        l2_reg_weight=l2_reg_weight,
     )
 
-    # 如需从已有 stage1 ckpt 继续，可设置 resume_path
-    trainer.train(resume_path=None, only_model=False)
+    trainer.train(
+        resume_path=None,
+        only_model=False,
+    )
 
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
     main()
+#export LD_LIBRARY_PATH=/home/ximutian/miniconda3/envs/xuyue/lib:$LD_LIBRARY_PATH
