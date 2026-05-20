@@ -177,9 +177,9 @@ class FSDPUNetAlignTrainer(FSDPUNetTrainer):
 
                 if self.is_master and batch_idx % 20 == 0 and self.writer is not None:
                     step = epoch * len(self.vallo) + batch_idx
-                    self.writer.add_scalar("Align/val/weighted_rmse_raw", weighted_rmse_raw, step)
+                    self.writer.add_scalar("Align/batch_val/weighted_rmse_raw", weighted_rmse_raw, step)
                     for ch, v in rmse_dict.items():
-                        self.writer.add_scalar(f"Align/val/channel_rmse/{ch}", v, step)
+                        self.writer.add_scalar(f"Align/batch_val/channel_rmse/{ch}", v, step)
 
         if num_batches == 0:
             avg_loss = 0.0

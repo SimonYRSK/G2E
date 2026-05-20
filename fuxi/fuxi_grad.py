@@ -899,7 +899,7 @@ class FuXi(nn.Module):
 
             model_state = {}
             if fmt == "pth":
-                chkpt = torch.load(checkpoint_tmp, map_location=torch.device("cuda"))
+                chkpt = torch.load(checkpoint_tmp, map_location=torch.device("cuda"), weights_only=False)
                 for k, v in chkpt["model"].items():
                     k = k.replace('decoder.', '')
                     model_state[k] = v
